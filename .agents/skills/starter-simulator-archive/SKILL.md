@@ -1,26 +1,20 @@
 ---
 name: starter-simulator-archive
-description: Download and verify the .app.tar.gz artifact from a successful exact-current-SHA Starter NativeSim GitHub Actions run using GitHub CLI. Use when the user asks to retrieve a Simulator archive.
+description: Locate an existing Starter NativeSim run with a verified uploaded .app.tar.gz and download it without starting another session or build.
 ---
 
 # Download the Starter Simulator archive
 
-Use only for an explicit request to compile and retrieve the `.app.tar.gz`, or `$starter-simulator-archive`. This flow runs the NativeSim build workflow with archive export enabled, then verifies and downloads that same run's artifact through GitHub CLI.
+Use only for an explicit archive retrieval request or `$starter-simulator-archive`. Never dispatch Swift Preflight, NativeSim, or another build from this skill. The main `$starter-nativesim` flow dispatches `export_app=true` and returns its links without waiting for the workflow artifact.
 
 ## Download
 
-From `C:\Projetos\Starter-NativeSim-Public`, run PowerShell 7:
+From either Starter folder, use PowerShell 7. Omit `-RunId` to find the newest existing `workflow_dispatch` run on public `main` whose Simulator build, archive export, and upload have succeeded and whose artifact is available. This can be an active 120-minute session; the script does not wait for it to finish. Pass `-RunId` to select one exact run:
 
 ```powershell
-pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\Start-StarterNativeSim.ps1 -Minutes 30 -ExportArchive
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\Download-StarterSimulatorArchive.ps1
 ```
 
-Wait for the CLI to return successfully and copy the numeric run ID from its GitHub Actions URL. Then run:
+The script verifies the exact public repository, workflow path, `workflow_dispatch` event, `main` branch, run ID and SHA, successful Xcode build, archive-export and upload steps, session ID, exact `native-sim-app-<session>` name, and non-expired artifact attached to that run. It reports the run SHA even when it differs from today's `main`, downloads only that run's artifact, and validates one readable `.app.tar.gz` containing an `.app` bundle. It prints the archive SHA-256 and stores the verified file under `C:\Projetos\Starter-NativeSim-Public\artifacts\<run-id>` without overwriting an existing output.
 
-```powershell
-pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\Download-StarterSimulatorArchive.ps1 -RunId 1234567890
-```
-
-The download script verifies that the run is complete and successful, came from `.github/workflows/native-sim.yml` on `main`, and targets the current live public `main` SHA. It derives the session ID from the workflow run title, downloads only that run's `native-sim-app-<session>` artifact using `gh run download`, and checks that exactly one readable `.app.tar.gz` contains an `.app` bundle. The CLI's `-ExportArchive` also downloads the artifact once to `artifacts`; the direct run-ID script stores a verified copy in its per-run folder.
-
-The verified archive is placed under `C:\Projetos\Starter-NativeSim-Public\artifacts\<run-id>`. The directory is ignored by Git. Stop on a failed, stale, ambiguous, or unreadable artifact. Do not download a different run's artifact or claim the archive was built from the current source unless the SHA check passes.
+The workflow retains new artifacts for seven days, subject to any lower repository or organization retention cap. The artifacts directory is ignored by Git. Stop if no qualifying artifact exists, if the run or artifact is ambiguous, or if archive integrity checks fail. Never start a new session, rerun Preflight, or rebuild to replace a missing artifact.

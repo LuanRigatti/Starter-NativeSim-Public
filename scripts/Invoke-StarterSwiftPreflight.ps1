@@ -1,21 +1,23 @@
 [CmdletBinding()]
 param(
   [ValidateRange(1, 300)][int]$TimeoutMinutes = 120,
-  [switch]$NoWait
+  [switch]$NoWait,
+  [switch]$PassThru
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 or newer is required.' }
 
 $publicRoot = [IO.Path]::GetFullPath('C:\Projetos\Starter-NativeSim-Public')
 $expectedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\Starter-NativeSim-Public'))
 if ($publicRoot -ne $expectedRoot -or -not (Test-Path -LiteralPath $publicRoot -PathType Container)) {
   throw 'Starter-NativeSim-Public is missing or resolves outside the authorized mirror folder.'
 }
-if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 or newer is required.' }
 
 $repo = 'LuanRigatti/Starter-NativeSim-Public'
 $workflow = 'swift-preflight.yml'
+$workflowPath = '.github/workflows/swift-preflight.yml'
 $origin = (& git -C $publicRoot remote get-url origin 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $origin -notmatch '(?i)(?:github\.com[:/])LuanRigatti/Starter-NativeSim-Public(?:\.git)?$') {
   throw 'The public mirror origin does not match LuanRigatti/Starter-NativeSim-Public.'
@@ -34,56 +36,123 @@ if ($LASTEXITCODE -ne 0 -or -not $live -or $live.Split()[0] -ne $sha) {
 }
 $visibility = (& gh repo view $repo --json visibility --jq .visibility 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $visibility.ToUpperInvariant() -ne 'PUBLIC') { throw 'Starter-NativeSim-Public must exist and be public.' }
-
-function Get-PreflightRuns {
-  $json = & gh run list --repo $repo --workflow $workflow --branch main --limit 100 --json databaseId,headSha,status,conclusion,url,createdAt,name 2>&1
-  if ($LASTEXITCODE -ne 0) { throw "Could not query Swift Preflight runs: $json" }
-  return @($json | ConvertFrom-Json)
+if (-not (Test-Path -LiteralPath (Join-Path $publicRoot $workflowPath) -PathType Leaf)) {
+  throw "Swift Preflight workflow is missing: $workflowPath."
 }
 
-$startedAt = [DateTimeOffset]::UtcNow
-$active = @(Get-PreflightRuns | Where-Object { $_.headSha -eq $sha -and $_.status -in @('queued','in_progress','waiting','requested') })
+function Get-PreflightRuns {
+  $json = & gh run list --repo $repo --workflow $workflow --branch main --commit $sha --limit 100 --json databaseId,headSha,headBranch,status,conclusion,url,event 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "Could not query Swift Preflight runs: $json" }
+  $parsed = @($json | ConvertFrom-Json)
+  return $parsed
+}
+
+function Get-VerifiedPreflightRun {
+  param([Parameter(Mandatory)][string]$RunId)
+  $json = & gh api "repos/$repo/actions/runs/$RunId" 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "Could not inspect Swift Preflight run $RunId : $json" }
+  $run = $json | ConvertFrom-Json
+  if ([string]$run.id -ne $RunId -or $run.path -ne $workflowPath -or $run.event -ne 'workflow_dispatch' -or
+      $run.head_branch -ne 'main' -or $run.head_sha -ne $sha) {
+    throw "Swift Preflight run $RunId does not match $repo, $workflowPath, workflow_dispatch, main, and exact SHA $sha."
+  }
+  return $run
+}
+
+$runs = @(Get-PreflightRuns | Where-Object {
+  $_.headSha -eq $sha -and $_.headBranch -eq 'main' -and $_.event -eq 'workflow_dispatch'
+})
+$lastKnownRunId = 0L
+foreach ($candidate in $runs) {
+  $candidateId = [long]$candidate.databaseId
+  if ($candidateId -gt $lastKnownRunId) { $lastKnownRunId = $candidateId }
+}
+$active = @($runs | Where-Object { $_.status -in @('queued','in_progress','waiting','requested','pending') })
 if ($active.Count -gt 1) { throw 'Multiple active Preflight runs target this exact SHA; refusing an ambiguous result.' }
+
+$reused = $false
+$run = $null
 if ($active.Count -eq 1) {
-  $run = $active[0]
-  Write-Output "Reusing active Swift Preflight run $($run.databaseId) for $sha."
+  $run = Get-VerifiedPreflightRun -RunId ([string]$active[0].databaseId)
+  $reused = $true
 } else {
+  $successful = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
+  if ($successful.Count -gt 0) {
+    $ordered = @($successful | Sort-Object { [long]$_.databaseId } -Descending)
+    foreach ($candidate in $ordered) {
+      $verified = Get-VerifiedPreflightRun -RunId ([string]$candidate.databaseId)
+      if ($verified.status -eq 'completed' -and $verified.conclusion -eq 'success') {
+        $run = $verified
+        $reused = $true
+        break
+      }
+    }
+  }
+}
+
+if (-not $run) {
+  Write-Host "No successful or active exact-SHA Swift Preflight exists for $sha; dispatching one run."
   & gh workflow run $workflow --repo $repo --ref main
   if ($LASTEXITCODE -ne 0) { throw 'GitHub rejected Swift Preflight dispatch.' }
+
   $run = $null
   $discoverUntil = [DateTimeOffset]::UtcNow.AddMinutes(2)
   do {
     $matches = @(Get-PreflightRuns | Where-Object {
-      $_.headSha -eq $sha -and [DateTimeOffset]::Parse($_.createdAt).ToUniversalTime() -ge $startedAt.AddSeconds(-2)
+      $_.headSha -eq $sha -and $_.headBranch -eq 'main' -and $_.event -eq 'workflow_dispatch' -and
+      [long]$_.databaseId -gt $lastKnownRunId
     })
     if ($matches.Count -gt 1) { throw 'Dispatch created multiple candidate runs; refusing an ambiguous result.' }
-    if ($matches.Count -eq 1) { $run = $matches[0]; break }
+    if ($matches.Count -eq 1) {
+      $run = Get-VerifiedPreflightRun -RunId ([string]$matches[0].databaseId)
+      break
+    }
     Start-Sleep -Seconds 5
   } while ([DateTimeOffset]::UtcNow -lt $discoverUntil)
   if (-not $run) { throw "No Swift Preflight run appeared for exact SHA $sha after dispatch." }
 }
 
-$runId = [string]$run.databaseId
+$runId = [string]$run.id
 if (-not $runId) { throw 'Swift Preflight run has no GitHub run ID.' }
+if ($NoWait -and $run.status -ne 'completed') {
+  $result = [pscustomobject]@{
+    Passed = $false
+    Reused = $reused
+    RunId = $runId
+    Branch = 'main'
+    Sha = $sha
+    Url = [string]$run.html_url
+    Status = [string]$run.status
+    Conclusion = [string]$run.conclusion
+  }
+  if ($PassThru) { return $result }
+  Write-Output "Swift Preflight run: $($result.Url)"
+  Write-Output "Run ID: $runId | Branch: main | SHA: $sha | Status: $($result.Status)"
+  return
+}
+
 $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
 do {
-  $runJson = & gh run view $runId --repo $repo --json databaseId,headSha,headBranch,status,conclusion,url,event,name 2>&1
-  if ($LASTEXITCODE -ne 0) { throw "Could not read Swift Preflight run $runId : $runJson" }
-  $current = $runJson | ConvertFrom-Json
-  if ($current.headSha -ne $sha -or $current.headBranch -ne 'main' -or $current.event -ne 'workflow_dispatch') {
-    throw "Swift Preflight identity mismatch for run $runId; expected main workflow_dispatch at $sha."
-  }
+  $current = Get-VerifiedPreflightRun -RunId $runId
   if ($current.status -eq 'completed') { break }
-  if ($NoWait) {
-    Write-Output "Swift Preflight run: $($current.url)"
-    Write-Output "Run ID: $runId | SHA: $sha | Status: $($current.status)"
-    exit 0
-  }
-  Write-Output "Swift Preflight $runId is $($current.status); waiting for $sha."
+  Write-Host "Swift Preflight $runId is $($current.status); waiting for exact SHA $sha."
   Start-Sleep -Seconds 10
 } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
-if ($current.status -ne 'completed') { throw "Swift Preflight run $runId did not complete within $TimeoutMinutes minutes: $($current.url)" }
-if ($current.conclusion -ne 'success') { throw "Swift Preflight concluded '$($current.conclusion)' for $sha. Run: $($current.url)" }
-Write-Output "Swift Preflight passed: $($current.url)"
+if ($current.status -ne 'completed') { throw "Swift Preflight run $runId did not complete within $TimeoutMinutes minutes: $($current.html_url)" }
+if ($current.conclusion -ne 'success') { throw "Swift Preflight concluded '$($current.conclusion)' for $sha. Run: $($current.html_url)" }
+
+$result = [pscustomobject]@{
+  Passed = $true
+  Reused = $reused
+  RunId = $runId
+  Branch = 'main'
+  Sha = $sha
+  Url = [string]$current.html_url
+  Status = [string]$current.status
+  Conclusion = [string]$current.conclusion
+}
+if ($PassThru) { return $result }
+$reuseText = if ($reused) { 'reused' } else { 'passed' }
+Write-Output "Swift Preflight ${reuseText}: $($result.Url)"
 Write-Output "Run ID: $runId | Branch: main | SHA: $sha | Conclusion: success"

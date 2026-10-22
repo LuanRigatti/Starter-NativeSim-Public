@@ -1,94 +1,413 @@
 [CmdletBinding()]
 param(
-  [ValidateRange(1, 350)][int]$Minutes = 30,
+  [ValidateRange(1, 350)][int]$Minutes = 120,
   [string]$Device = 'iPhone 17 Pro',
-  [switch]$ExportArchive
+  [string]$Scheme = 'Starter'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 or newer is required.' }
 
-$publicRoot = [IO.Path]::GetFullPath('C:\Projetos\Starter-NativeSim-Public')
-$expectedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\Starter-NativeSim-Public'))
-if ($publicRoot -ne $expectedRoot -or -not (Test-Path -LiteralPath $publicRoot -PathType Container)) {
-  throw 'Starter-NativeSim-Public is missing or resolves outside the authorized mirror folder.'
-}
 $repo = 'LuanRigatti/Starter-NativeSim-Public'
-$sourceRoot = [IO.Path]::GetFullPath((Join-Path $publicRoot '..\Starter'))
-if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) { throw 'The private Starter source folder is missing.' }
+$sourceRepo = 'LuanRigatti/Starter'
+$sourceRoot = [IO.Path]::GetFullPath('C:\Projetos\Starter')
+$expectedSource = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$publicRoot = [IO.Path]::GetFullPath('C:\Projetos\Starter-NativeSim-Public')
+$expectedPublic = [IO.Path]::GetFullPath((Join-Path $sourceRoot '..\Starter-NativeSim-Public'))
+if ($sourceRoot -ne $expectedSource -or $publicRoot -ne $expectedPublic -or
+    -not (Test-Path -LiteralPath $sourceRoot -PathType Container) -or
+    -not (Test-Path -LiteralPath $publicRoot -PathType Container)) {
+  throw 'Starter source or public mirror is missing or resolves outside the two authorized folders.'
+}
+Import-Module (Join-Path $sourceRoot 'scripts\StarterMirrorSecurity.psm1') -Force -DisableNameChecking -ErrorAction Stop
+$sourceRoot = Assert-StarterMirrorRoot -Root $sourceRoot
+$publicRoot = Assert-StarterMirrorRoot -Root $publicRoot
+Import-Module (Join-Path $sourceRoot 'scripts\StarterNativeSimCliGuard.psm1') -Force -DisableNameChecking -ErrorAction Stop
 
-foreach ($path in @($publicRoot,$sourceRoot)) {
-  $root = [IO.Path]::GetFullPath((& git -C $path rev-parse --show-toplevel 2>&1 | Out-String).Trim())
-  if ($LASTEXITCODE -ne 0 -or $root -ne $path) { throw "Unexpected Git root: $root" }
-  $status = (& git -C $path status --porcelain=v1 --untracked-files=all 2>&1 | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0 -or $status) { throw "Worktree must be clean: $path" }
-}
-$sourceBranch = (& git -C $sourceRoot branch --show-current 2>&1 | Out-String).Trim()
-if ($sourceBranch -ne 'main') { throw "Private Starter source must be on main; found '$sourceBranch'." }
-$sourceSha = (& git -C $sourceRoot rev-parse HEAD 2>&1 | Out-String).Trim()
-$sourceRemote = (& git -C $sourceRoot ls-remote origin refs/heads/main 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $sourceRemote -or $sourceRemote.Split()[0] -ne $sourceSha) {
-  throw 'Private Starter main is not exactly synchronized with GitHub.'
-}
-$sourceVisibility = (& gh repo view LuanRigatti/Starter --json visibility --jq .visibility 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceVisibility.ToUpperInvariant() -ne 'PRIVATE') { throw 'LuanRigatti/Starter must be private.' }
-
-$mirrorBranch = (& git -C $publicRoot branch --show-current 2>&1 | Out-String).Trim()
-if ($mirrorBranch -ne 'main') { throw "Public mirror must be on main; found '$mirrorBranch'." }
-$mirrorSha = (& git -C $publicRoot rev-parse HEAD 2>&1 | Out-String).Trim()
-$mirrorRemote = (& git -C $publicRoot ls-remote origin refs/heads/main 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $mirrorRemote -or $mirrorRemote.Split()[0] -ne $mirrorSha) {
-  throw 'Public mirror main is not exactly synchronized with GitHub.'
-}
-$mirrorVisibility = (& gh repo view $repo --json visibility --jq .visibility 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $mirrorVisibility.ToUpperInvariant() -ne 'PUBLIC') { throw 'Starter-NativeSim-Public must be public.' }
-$provenance = Get-Content -LiteralPath (Join-Path $publicRoot '.nativesim-source') -Raw
-if ($provenance -notmatch "(?m)^source_repository=LuanRigatti/Starter\r?$" -or
-    $provenance -notmatch "(?m)^source_branch=main\r?$" -or
-    $provenance -notmatch "(?m)^source_commit=$([regex]::Escape($sourceSha))\r?$") {
-  throw 'Public mirror provenance does not identify the exact live private Starter commit.'
-}
-$latestMessage = (& git -C $publicRoot log -1 --format=%B 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -or $latestMessage -notmatch "(?m)^Source-Commit: $([regex]::Escape($sourceSha))\r?$") {
-  throw 'Public mirror HEAD does not carry the exact private source commit trailer.'
+function Invoke-GitText {
+  param([string]$Repository,[string[]]$GitArguments)
+  $output = & git -C $Repository @GitArguments 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "git $($GitArguments -join ' ') failed in $Repository : $output" }
+  return (($output | ForEach-Object { "$_" }) -join "`n").Trim()
 }
 
-$nativeSimCommand = Get-Command native-sim.ps1 -ErrorAction SilentlyContinue
-if (-not $nativeSimCommand) { throw 'NativeSim CLI is not installed or native-sim.ps1 is not on PATH.' }
-if (-not (Test-Path -LiteralPath (Join-Path $publicRoot '.github\workflows\native-sim.yml')) -or
-    -not (Test-Path -LiteralPath (Join-Path $publicRoot '.github\native-sim\gate.cjs'))) {
-  throw 'Starter NativeSim workflow or authentication gate is missing.'
+function Invoke-GhText {
+  param([string[]]$GhArguments)
+  $output = & gh @GhArguments 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "gh $($GhArguments -join ' ') failed: $output" }
+  return (($output | ForEach-Object { "$_" }) -join "`n").Trim()
 }
 
-$latestRunJson = & gh run list --repo $repo --workflow native-sim.yml --branch main --limit 100 --json databaseId,headSha,status,url,createdAt,name 2>&1
-if ($LASTEXITCODE -ne 0) { throw "Could not inspect existing NativeSim sessions: $latestRunJson" }
-$active = @($latestRunJson | ConvertFrom-Json | Where-Object { $_.headSha -eq $mirrorSha -and $_.status -in @('queued','in_progress','waiting','requested') })
-if ($active.Count -gt 0) { throw "An active NativeSim session already targets public SHA ${mirrorSha}: $($active[0].url)" }
-
-$preflight = Join-Path $PSScriptRoot 'Invoke-StarterSwiftPreflight.ps1'
-& pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $preflight
-if ($LASTEXITCODE -ne 0) { throw 'Exact-SHA Swift Preflight did not pass; NativeSim was not started.' }
-
-$postPreflightSha = (& git -C $publicRoot rev-parse HEAD 2>&1 | Out-String).Trim()
-$postPreflightRemote = (& git -C $publicRoot ls-remote origin refs/heads/main 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $postPreflightSha -ne $mirrorSha -or $postPreflightRemote.Split()[0] -ne $mirrorSha) {
-  throw 'Public mirror changed during Preflight; NativeSim was not started.'
+function Assert-Repository {
+  param([string]$Root,[string]$Slug,[string]$ExpectedBranch)
+  $actualRoot = [IO.Path]::GetFullPath((Invoke-GitText $Root @('rev-parse','--show-toplevel')))
+  if ($actualRoot -ne $Root) { throw "Unexpected Git root: $actualRoot" }
+  $item = Get-Item -LiteralPath $Root -Force
+  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Repository root is a linked/reparse path: $Root" }
+  $branch = Invoke-GitText $Root @('branch','--show-current')
+  if ($branch -ne $ExpectedBranch) { throw "Expected $Slug branch $ExpectedBranch; found '$branch'." }
+  $status = Invoke-GitText $Root @('status','--porcelain=v1','--untracked-files=all')
+  if ($status) { throw "$Slug worktree must be clean before this operation: $Root" }
+  $origin = Invoke-GitText $Root @('remote','get-url','origin')
+  if ($origin -notmatch "(?i)(?:github\.com[:/])$([regex]::Escape($Slug))(?:\.git)?$") {
+    throw "$Slug origin URL does not match the authorized repository."
+  }
+  $pushOrigin = Invoke-GitText $Root @('remote','get-url','--push','origin')
+  if ($pushOrigin -notmatch "(?i)(?:github\.com[:/])$([regex]::Escape($Slug))(?:\.git)?$") {
+    throw "$Slug origin push URL does not match the authorized repository."
+  }
+  $head = Invoke-GitText $Root @('rev-parse','HEAD')
+  if ($head -notmatch '^[0-9a-f]{40}$') { throw "$Slug HEAD is not a valid commit SHA." }
+  $remote = Invoke-GitText $Root @('ls-remote','origin','refs/heads/' + $ExpectedBranch)
+  if (-not $remote -or $remote.Split()[0] -ne $head) { throw "$Slug local $ExpectedBranch must exactly match live origin/$ExpectedBranch." }
+  return $head
 }
-$postStatus = (& git -C $publicRoot status --porcelain=v1 --untracked-files=all 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $postStatus) { throw 'Public mirror became dirty during Preflight; NativeSim was not started.' }
 
-$arguments = @('up','--public','--minutes',[string]$Minutes,'--device',$Device,'--scheme','Starter','--no-open')
-if ($ExportArchive) {
-  $artifactDirectory = Join-Path $publicRoot 'artifacts'
-  New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
-  $arguments += @('--export','--out',$artifactDirectory)
+function Get-RepoVisibility {
+  param([string]$Slug)
+  return Invoke-GhText @('repo','view',$Slug,'--json','visibility','--jq','.visibility')
 }
-Write-Output "Starting NativeSim for public mirror SHA $mirrorSha."
-Push-Location $publicRoot
+
+function Get-ActiveNativeSimRuns {
+  $activeRuns = [Collections.Generic.List[object]]::new()
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($status in @('queued','in_progress','waiting','requested','pending')) {
+    $endpoint = "repos/$repo/actions/workflows/native-sim.yml/runs?branch=main&status=$status&per_page=100"
+    $json = Invoke-GhText @('api',$endpoint)
+    $response = $json | ConvertFrom-Json
+    foreach ($run in @($response.workflow_runs)) {
+      $id = [string]$run.id
+      if ($run.path -eq '.github/workflows/native-sim.yml' -and $run.event -eq 'workflow_dispatch' -and
+          $run.head_branch -eq 'main' -and $seen.Add($id)) {
+        $activeRuns.Add($run)
+      }
+    }
+  }
+  return @(Select-StarterNativeSimActiveRuns -Runs @($activeRuns))
+}
+
+function Get-SafeCliDiagnostics {
+  param([string[]]$Lines)
+  $safe = foreach ($line in ($Lines | Select-Object -Last 8)) {
+    $text = [regex]::Replace([string]$line,'https://\S+\?k=\S+','[authenticated simulator URL withheld]')
+    $text = [regex]::Replace($text,'(?i)(gate[_-]?token\s*[=:]\s*)\S+','$1[redacted]')
+    $text
+  }
+  return ($safe -join "`n").Trim()
+}
+
+function Save-SafeSessionMetadata {
+  param([string]$CloneRoot,[string]$MirrorRoot,[string]$ExpectedRunId,[string]$ExpectedSha,[string]$ActionsUrl,[string]$SimulatorUrl)
+  $relativePath = Invoke-GitText $CloneRoot @('rev-parse','--git-path','native-sim-session.json')
+  $sourcePath = if ([IO.Path]::IsPathRooted($relativePath)) { $relativePath } else { Join-Path $CloneRoot $relativePath }
+  if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { return $false }
+  $json = Get-Content -LiteralPath $sourcePath -Raw
+  $data = $json | ConvertFrom-Json -AsHashtable
+  $allowedKeys = @('session','runId','sha','repo','context','url','startedAt')
+  if (@($data.Keys | Where-Object { $_ -notin $allowedKeys }).Count -gt 0 -or $json.Contains($SimulatorUrl)) {
+    throw 'NativeSim local session metadata contains an unexpected field; authenticated URL was not saved.'
+  }
+  $session = [string]$data.session
+  if ($session -notmatch '^[a-f0-9]{8}$' -or [string]$data.runId -ne $ExpectedRunId -or
+      [string]$data.sha -ne $ExpectedSha -or [string]$data.repo -ne $repo -or
+      [string]$data.context -ne "native-sim/$session" -or [string]$data.url -ne $ActionsUrl -or
+      -not $data.startedAt) {
+    throw 'NativeSim local session metadata does not match the validated run; it was not saved.'
+  }
+  $gitDirectory = [IO.Path]::GetFullPath((Invoke-GitText $MirrorRoot @('rev-parse','--absolute-git-dir')))
+  $targetPath = Join-Path $gitDirectory 'native-sim-session.json'
+  if (Test-Path -LiteralPath $targetPath) {
+    $target = Get-Item -LiteralPath $targetPath -Force
+    if (($target.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'NativeSim session metadata target is a linked/reparse file.' }
+  }
+  $temporaryPath = Join-Path $gitDirectory ('.native-sim-session-' + [guid]::NewGuid().ToString('N') + '.tmp')
+  try {
+    [IO.File]::WriteAllText($temporaryPath,$json,[Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporaryPath -Destination $targetPath -Force
+  } finally {
+    if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
+  }
+  return $true
+}
+
+$mutex = [Threading.Mutex]::new($false,'Local\StarterNativeSimLaunch')
+$mutexAcquired = $false
+$temporaryRoot = $null
+$nativeProcess = $null
+$stdoutSubscription = $null
+$stderrSubscription = $null
+$stdoutEventName = $null
+$stderrEventName = $null
+$stdoutLines = [Collections.Generic.List[string]]::new()
+$stderrLines = [Collections.Generic.List[string]]::new()
+$actionsUrl = $null
+$simulatorUrl = $null
 try {
-  & $nativeSimCommand.Source @arguments
-  if ($LASTEXITCODE -ne 0) { throw "NativeSim exited with code $LASTEXITCODE." }
+  try { $mutexAcquired = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $mutexAcquired = $true }
+  if (-not $mutexAcquired) { throw 'Another Starter NativeSim launcher is already running; refusing a duplicate session.' }
+
+  $sourceSha = Assert-Repository -Root $sourceRoot -Slug $sourceRepo -ExpectedBranch 'main'
+  if ((Get-RepoVisibility $sourceRepo).ToUpperInvariant() -ne 'PRIVATE') { throw 'LuanRigatti/Starter must be PRIVATE.' }
+  Write-Output "Private Starter is clean and synchronized at $sourceSha."
+
+  $securityTests = Join-Path $sourceRoot 'tests\StarterSecurity.Tests.ps1'
+  if (-not (Test-Path -LiteralPath $securityTests -PathType Leaf)) { throw 'Starter security simulation tests are missing; mirror and NativeSim were not started.' }
+  $testPowerShell = Get-Command pwsh.exe -ErrorAction Stop
+  & $testPowerShell.Source -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $securityTests
+  if ($LASTEXITCODE -ne 0) { throw 'Starter security simulations failed; mirror and NativeSim were not started.' }
+  Write-Output 'Starter security simulations passed before public mirror publication.'
+
+  $mirrorScript = Join-Path $sourceRoot 'scripts\mirror-starter.ps1'
+  & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $mirrorScript -Publish
+  if ($LASTEXITCODE -ne 0) { throw 'Sanitized Starter mirror did not complete successfully; Preflight and NativeSim were not started.' }
+
+  $sourceSha = Assert-Repository -Root $sourceRoot -Slug $sourceRepo -ExpectedBranch 'main'
+  $mirrorSha = Assert-Repository -Root $publicRoot -Slug $repo -ExpectedBranch 'main'
+  if ((Get-RepoVisibility $repo).ToUpperInvariant() -ne 'PUBLIC') { throw 'LuanRigatti/Starter-NativeSim-Public must be PUBLIC.' }
+  $provenancePath = Resolve-StarterMirrorPath -Base $publicRoot -RelativePath '.nativesim-source' -ExpectedType File
+  $provenance = Get-Content -LiteralPath $provenancePath -Raw
+  if ($provenance -notmatch "(?m)^source_repository=$([regex]::Escape($sourceRepo))\r?$" -or
+      $provenance -notmatch '(?m)^source_branch=main\r?$' -or
+      $provenance -notmatch "(?m)^source_commit=$([regex]::Escape($sourceSha))\r?$") {
+    throw 'Public mirror provenance does not identify the exact private Starter commit.'
+  }
+  $latestMessage = Invoke-GitText $publicRoot @('log','-1','--format=%B')
+  if ($latestMessage -notmatch "(?m)^Source-Repository: $([regex]::Escape($sourceRepo))\r?$" -or
+      $latestMessage -notmatch "(?m)^Source-Commit: $([regex]::Escape($sourceSha))\r?$" -or
+      $latestMessage -notmatch '(?m)^Source-Branch: main\r?$') {
+    throw 'Public mirror HEAD commit trailers do not prove exact Starter source provenance.'
+  }
+  $workflowPath = Resolve-StarterMirrorPath -Base $publicRoot -RelativePath '.github\workflows\native-sim.yml' -ExpectedType File
+  $gatePath = Resolve-StarterMirrorPath -Base $publicRoot -RelativePath '.github\native-sim\gate.cjs' -ExpectedType File
+
+  $preflightScript = Join-Path $sourceRoot 'scripts\Invoke-StarterSwiftPreflight.ps1'
+  $preflightResults = @(& $preflightScript -PassThru)
+  if ($preflightResults.Count -ne 1 -or -not $preflightResults[0].Passed -or
+      $preflightResults[0].Sha -ne $mirrorSha -or $preflightResults[0].Branch -ne 'main') {
+    throw 'Swift Preflight did not pass for the exact public mirror SHA; NativeSim was not started.'
+  }
+  $preflight = $preflightResults[0]
+
+  $postSourceSha = Assert-Repository -Root $sourceRoot -Slug $sourceRepo -ExpectedBranch 'main'
+  $postMirrorSha = Assert-Repository -Root $publicRoot -Slug $repo -ExpectedBranch 'main'
+  if ($postSourceSha -ne $sourceSha -or $postMirrorSha -ne $mirrorSha) {
+    throw 'Source or public mirror SHA changed during Swift Preflight; NativeSim was not started.'
+  }
+  $postProvenance = Get-Content -LiteralPath $provenancePath -Raw
+  if ($postProvenance -notmatch "(?m)^source_commit=$([regex]::Escape($sourceSha))\r?$") {
+    throw 'Public mirror provenance changed during Swift Preflight; NativeSim was not started.'
+  }
+
+  $workflowJson = Invoke-GhText @('api',"repos/$repo/actions/workflows/native-sim.yml")
+  $workflow = $workflowJson | ConvertFrom-Json
+  if ($workflow.path -ne '.github/workflows/native-sim.yml' -or $workflow.state -ne 'active') {
+    throw 'The public NativeSim workflow is not registered and active; refusing the CLI recovery push path.'
+  }
+  $activeRuns = @(Get-ActiveNativeSimRuns)
+  if ($activeRuns.Count -gt 0) {
+    $activeRun = $activeRuns[0]
+    throw "An active NativeSim run already exists on main (run $($activeRun.id), SHA $($activeRun.head_sha)): $($activeRun.html_url). No duplicate was started."
+  }
+
+  $nativeSimCommand = Get-Command native-sim.ps1 -ErrorAction SilentlyContinue
+  if (-not $nativeSimCommand -or -not (Test-Path -LiteralPath $nativeSimCommand.Source -PathType Leaf)) {
+    throw 'Installed NativeSim CLI is unavailable; native-sim.ps1 is not on PATH.'
+  }
+  $nativeSimPackage = Join-Path (Split-Path -Parent $nativeSimCommand.Source) 'node_modules\native-sim'
+  $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+  if (-not $nodeCommand -or -not (Test-Path -LiteralPath $nodeCommand.Source -PathType Leaf)) {
+    throw 'Node.js is unavailable; cannot inspect the installed NativeSim scaffold safely.'
+  }
+  $cliCompatibility = Assert-StarterNativeSimCliCompatible -CliPackageRoot $nativeSimPackage -WorkflowPath $workflowPath -GatePath $gatePath
+  $nativeSimUpSource = Join-Path $nativeSimPackage 'src\commands\up.js'
+  if (-not (Test-Path -LiteralPath $nativeSimUpSource -PathType Leaf)) {
+    throw 'Could not verify the installed NativeSim export behavior; refusing to start a session without guaranteed archive export.'
+  }
+  $nativeSimUpText = Get-Content -LiteralPath $nativeSimUpSource -Raw
+  $workflowText = Get-Content -LiteralPath $workflowPath -Raw
+  $null = Assert-StarterNativeSimExportBehavior -NativeSimUpText $nativeSimUpText -WorkflowText $workflowText
+  $pwshCommand = Get-Command pwsh.exe -ErrorAction Stop
+  $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('starter-nativesim-' + [guid]::NewGuid().ToString('N'))
+  $cloneRoot = Join-Path $temporaryRoot 'mirror'
+  $pushSink = Join-Path $temporaryRoot 'push-sink.git'
+  New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+  & git clone --quiet --no-hardlinks --single-branch --branch main $publicRoot $cloneRoot
+  if ($LASTEXITCODE -ne 0) { throw 'Could not create an isolated NativeSim checkout.' }
+  & git init --bare --quiet $pushSink
+  if ($LASTEXITCODE -ne 0) { throw 'Could not create the isolated no-op push destination.' }
+  & git -C $cloneRoot push --quiet $pushSink 'main:refs/heads/main'
+  if ($LASTEXITCODE -ne 0) { throw 'Could not seed the isolated push destination at the public mirror SHA.' }
+  & git -C $cloneRoot remote set-url origin "https://github.com/$repo.git"
+  if ($LASTEXITCODE -ne 0) { throw 'Could not set the isolated checkout fetch URL.' }
+  & git -C $cloneRoot remote set-url --push origin $pushSink
+  if ($LASTEXITCODE -ne 0) { throw 'Could not redirect the NativeSim CLI push to the isolated local sink.' }
+  $cloneRootFound = [IO.Path]::GetFullPath((Invoke-GitText $cloneRoot @('rev-parse','--show-toplevel')))
+  $cloneBranch = Invoke-GitText $cloneRoot @('branch','--show-current')
+  $cloneSha = Invoke-GitText $cloneRoot @('rev-parse','HEAD')
+  $cloneStatus = Invoke-GitText $cloneRoot @('status','--porcelain=v1','--untracked-files=all')
+  $cloneFetchUrl = Invoke-GitText $cloneRoot @('remote','get-url','origin')
+  $clonePushUrl = [IO.Path]::GetFullPath((Invoke-GitText $cloneRoot @('remote','get-url','--push','origin')))
+  $sinkSha = Invoke-GitText $pushSink @('rev-parse','refs/heads/main')
+  $githubSha = Invoke-GitText $cloneRoot @('ls-remote','origin','refs/heads/main')
+  if ($cloneRootFound -ne [IO.Path]::GetFullPath($cloneRoot) -or $cloneBranch -ne 'main' -or
+      $cloneSha -ne $mirrorSha -or $cloneStatus -or $sinkSha -ne $mirrorSha -or
+      $cloneFetchUrl -notmatch "(?i)^https://github\.com/$([regex]::Escape($repo))\.git$" -or
+      $clonePushUrl -ne [IO.Path]::GetFullPath($pushSink) -or $githubSha.Split()[0] -ne $mirrorSha) {
+    throw 'Isolated NativeSim checkout failed exact-SHA, clean-tree, live-origin, or no-op push-destination verification.'
+  }
+  $scaffoldPreview = Invoke-StarterNativeSimScaffoldPreview -CliPackageRoot $nativeSimPackage -CheckoutRoot $cloneRoot -ExpectedSha $mirrorSha -NodeExecutable $nodeCommand.Source
+  if ($scaffoldPreview.ScaffoldChanged -or $scaffoldPreview.CheckoutSha -ne $mirrorSha) {
+    throw 'NativeSim scaffold preview did not preserve the audited public SHA; NativeSim was not started.'
+  }
+  Write-Output "NativeSim scaffold preview: workflow v$($cliCompatibility.WorkflowVersion), gate v$($cliCompatibility.GateVersion); generated files unchanged at $mirrorSha."
+
+  $global:StarterNativeSimStdoutQueue = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+  $global:StarterNativeSimStderrQueue = [Collections.Concurrent.ConcurrentQueue[string]]::new()
+  $eventSuffix = [guid]::NewGuid().ToString('N')
+  $stdoutEventName = "StarterNativeSimStdout-$eventSuffix"
+  $stderrEventName = "StarterNativeSimStderr-$eventSuffix"
+  $nativeProcess = [Diagnostics.Process]::new()
+  $nativeProcess.StartInfo.FileName = $pwshCommand.Source
+  $nativeProcess.StartInfo.WorkingDirectory = $cloneRoot
+  $nativeProcess.StartInfo.UseShellExecute = $false
+  $nativeProcess.StartInfo.CreateNoWindow = $true
+  $nativeProcess.StartInfo.RedirectStandardOutput = $true
+  $nativeProcess.StartInfo.RedirectStandardError = $true
+  $cliArguments = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$nativeSimCommand.Source,
+    'up','--public','--minutes',[string]$Minutes,'--device',$Device,'--scheme',$Scheme,'--no-open','--export')
+  if ($cliArguments -notcontains '--export') { throw 'NativeSim must be dispatched with --export so the workflow receives export_app=true.' }
+  Write-Output 'Verified NativeSim --export dispatches export_app=true; the local CLI will be stopped after both links, before its artifact wait/download.'
+  foreach ($argument in $cliArguments) { [void]$nativeProcess.StartInfo.ArgumentList.Add($argument) }
+  $stdoutSubscription = Register-ObjectEvent -InputObject $nativeProcess -EventName OutputDataReceived -SourceIdentifier $stdoutEventName -Action {
+    $line = $Event.SourceEventArgs.Data
+    if ($null -ne $line) { [void]$global:StarterNativeSimStdoutQueue.Enqueue($line) }
+  }
+  $stderrSubscription = Register-ObjectEvent -InputObject $nativeProcess -EventName ErrorDataReceived -SourceIdentifier $stderrEventName -Action {
+    $line = $Event.SourceEventArgs.Data
+    if ($null -ne $line) { [void]$global:StarterNativeSimStderrQueue.Enqueue($line) }
+  }
+  if (-not $nativeProcess.Start()) { throw 'Could not start the installed NativeSim CLI.' }
+  $nativeProcess.BeginOutputReadLine()
+  $nativeProcess.BeginErrorReadLine()
+  Write-Output "NativeSim dispatched for public main SHA $mirrorSha with a $Minutes-minute session; waiting only for its two links."
+
+  $linkDeadline = [DateTimeOffset]::UtcNow.AddMinutes(50)
+  $runId = $null
+  while ([DateTimeOffset]::UtcNow -lt $linkDeadline) {
+    $null = Wait-Event -Timeout 0.5
+    $line = $null
+    while ($global:StarterNativeSimStdoutQueue.TryDequeue([ref]$line)) {
+      $stdoutLines.Add($line)
+      $plainLine = [regex]::Replace($line,"`e\[[0-?]*[ -/]*[@-~]",'').Trim()
+      if (-not $actionsUrl) {
+        $runMatch = [regex]::Match($plainLine,'https://github\.com/LuanRigatti/Starter-NativeSim-Public/actions/runs/(?<id>[0-9]+)')
+        if ($runMatch.Success) {
+          $actionsUrl = $runMatch.Value
+          $runId = $runMatch.Groups['id'].Value
+        }
+      }
+      if (-not $simulatorUrl) {
+        $simulatorMatch = [regex]::Match($plainLine,'https://[A-Za-z0-9.-]+\.trycloudflare\.com/\?[^\s]+')
+        if ($simulatorMatch.Success) { $simulatorUrl = $simulatorMatch.Value }
+      }
+    }
+    $line = $null
+    while ($global:StarterNativeSimStderrQueue.TryDequeue([ref]$line)) { $stderrLines.Add($line) }
+    if ($actionsUrl -and $simulatorUrl) { break }
+    if ($nativeProcess.HasExited) { break }
+  }
+
+  if (-not $nativeProcess.HasExited) {
+    $nativeProcess.Kill($true)
+    $nativeProcess.WaitForExit(15000) | Out-Null
+  }
+  $null = Wait-Event -Timeout 0.2
+  $line = $null
+  while ($global:StarterNativeSimStdoutQueue.TryDequeue([ref]$line)) { $stdoutLines.Add($line) }
+  while ($global:StarterNativeSimStderrQueue.TryDequeue([ref]$line)) { $stderrLines.Add($line) }
+  if (-not $actionsUrl -or -not $simulatorUrl) {
+    $allDiagnostics = @($stderrLines)
+    $allDiagnostics += @($stdoutLines)
+    $diagnostics = Get-SafeCliDiagnostics -Lines $allDiagnostics
+    if (-not $diagnostics) { $diagnostics = 'The CLI exited or timed out before emitting both links.' }
+    throw "NativeSim did not provide both verified links. $diagnostics"
+  }
+  $cloneAfterSha = Invoke-GitText $cloneRoot @('rev-parse','HEAD')
+  $sinkAfterSha = Invoke-GitText $pushSink @('rev-parse','refs/heads/main')
+  $cloneAfterStatus = Invoke-GitText $cloneRoot @('status','--porcelain=v1','--untracked-files=all')
+  $workflowAfterHash = (Get-FileHash -LiteralPath (Join-Path $cloneRoot '.github\workflows\native-sim.yml') -Algorithm SHA256).Hash
+  $gateAfterHash = (Get-FileHash -LiteralPath (Join-Path $cloneRoot '.github\native-sim\gate.cjs') -Algorithm SHA256).Hash
+  if ($cloneAfterSha -ne $mirrorSha -or $sinkAfterSha -ne $mirrorSha -or $cloneAfterStatus -or
+      $workflowAfterHash -ne $scaffoldPreview.WorkflowSha256 -or $gateAfterHash -ne $scaffoldPreview.GateSha256) {
+    throw 'NativeSim changed or attempted to publish from its disposable checkout; refusing to deliver an unverified session.'
+  }
+  $simulatorUrl = Assert-StarterSimulatorUrl -Url $simulatorUrl
+
+  $runJson = Invoke-GhText @('api',"repos/$repo/actions/runs/$runId")
+  $run = $runJson | ConvertFrom-Json
+  if ([string]$run.id -ne $runId -or $run.path -ne '.github/workflows/native-sim.yml' -or
+      $run.event -ne 'workflow_dispatch' -or $run.head_branch -ne 'main' -or $run.head_sha -ne $mirrorSha -or
+      [string]$run.html_url -ne $actionsUrl) {
+    throw "NativeSim run $runId does not match the exact public repository, workflow, branch, SHA, and CLI Actions URL."
+  }
+  $initialStatus = [string]$run.status
+  $initialConclusion = [string]$run.conclusion
+  $activeStep = $null
+  try {
+    $jobsJson = Invoke-GhText @('api',"repos/$repo/actions/runs/$runId/jobs?per_page=100")
+    $jobs = @(($jobsJson | ConvertFrom-Json).jobs)
+    foreach ($job in $jobs) {
+      $step = @($job.steps | Where-Object { $_.status -eq 'in_progress' } | Select-Object -First 1)
+      if ($step.Count -gt 0) { $activeStep = [string]$step[0].name; break }
+    }
+  } catch {
+    $activeStep = $null
+  }
+  try {
+    if (-not (Save-SafeSessionMetadata -CloneRoot $cloneRoot -MirrorRoot $publicRoot -ExpectedRunId $runId -ExpectedSha $mirrorSha -ActionsUrl $actionsUrl -SimulatorUrl $simulatorUrl)) {
+      Write-Warning 'The CLI session metadata was not present in its isolated checkout; the two returned links remain valid.'
+    }
+  } catch {
+    Write-Warning 'Could not save safe NativeSim session metadata in the public checkout; no authenticated URL was written to disk.'
+  }
+
+  $preflightKind = if ($preflight.Reused) { 'reused exact-SHA success' } else { 'new exact-SHA success' }
+  $compileState = if ($initialStatus -eq 'completed') { "completed ($initialConclusion)" } else { $initialStatus }
+  $stepText = if ($activeStep) { "; current step: $activeStep" } else { '' }
+  Write-Output "Swift Preflight: $preflightKind | run $($preflight.RunId) | SHA $mirrorSha | $($preflight.Url)"
+  Write-Output "NativeSim: run $runId | branch main | SHA $mirrorSha | $Minutes minutes | initial workflow status $compileState$stepText"
+  Write-Output "GitHub Actions: $actionsUrl"
+  Write-Output "Authenticated Simulator: $simulatorUrl"
+  Write-Output 'Local NativeSim CLI stopped after link capture; the remote GitHub Actions run and Simulator session continue.'
 } finally {
-  Pop-Location
+  if ($nativeProcess) {
+    try {
+      if (-not $nativeProcess.HasExited) { $nativeProcess.Kill($true); $nativeProcess.WaitForExit(10000) | Out-Null }
+    } catch { }
+    $nativeProcess.Dispose()
+  }
+  foreach ($eventName in @($stdoutEventName,$stderrEventName)) {
+    if ($eventName) {
+      Unregister-Event -SourceIdentifier $eventName -ErrorAction SilentlyContinue
+      Remove-Event -SourceIdentifier $eventName -ErrorAction SilentlyContinue
+    }
+  }
+  foreach ($subscription in @($stdoutSubscription,$stderrSubscription)) {
+    if ($subscription -and $subscription.Action) { $subscription.Action | Remove-Job -Force -ErrorAction SilentlyContinue }
+  }
+  Remove-Variable -Name StarterNativeSimStdoutQueue,StarterNativeSimStderrQueue -Scope Global -ErrorAction SilentlyContinue
+  if ($temporaryRoot) {
+    $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $resolvedTemp = [IO.Path]::GetFullPath($temporaryRoot)
+    if ($resolvedTemp.StartsWith($tempBase,[StringComparison]::OrdinalIgnoreCase) -and
+        (Split-Path -Leaf $resolvedTemp) -match '^starter-nativesim-[a-f0-9]{32}$') {
+      $item = Get-Item -LiteralPath $resolvedTemp -Force -ErrorAction SilentlyContinue
+      if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+        Remove-Item -LiteralPath $resolvedTemp -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+  if ($mutexAcquired) { $mutex.ReleaseMutex() }
+  $mutex.Dispose()
 }

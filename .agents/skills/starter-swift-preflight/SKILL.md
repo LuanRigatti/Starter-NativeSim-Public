@@ -1,6 +1,6 @@
 ---
 name: starter-swift-preflight
-description: Dispatch, follow, and verify the manual Swift Preflight workflow for the exact current public Starter NativeSim mirror commit. Use when the user explicitly asks to run or inspect this preflight.
+description: Reuse or run and verify Swift Preflight for the exact current public Starter NativeSim mirror SHA. Use when explicitly asked to run or inspect the preflight.
 ---
 
 # Starter Swift Preflight
@@ -17,6 +17,6 @@ Run from either Starter project using PowerShell 7 or later:
 pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\Invoke-StarterSwiftPreflight.ps1
 ```
 
-The script resolves the fixed public mirror path and refuses the run unless the mirror is clean on `main`, its local SHA equals live `origin/main`, the GitHub repository is public, and the workflow is present. It dispatches at most once, resolves the run ID, and requires the run's branch, event, and `headSha` to match the exact public commit. It waits for completion by default and succeeds only on conclusion `success`.
+The script resolves the fixed public mirror path and refuses to act unless the mirror is clean on `main`, its local SHA equals live `origin/main`, the GitHub repository is public, and the workflow exists. It reuses only an active or successful run whose repository, workflow path, `workflow_dispatch` event, branch, and `headSha` match exactly. Otherwise it dispatches once and identifies the new run by its run ID, avoiding Windows locale-sensitive timestamp parsing, then waits for completion by default. It succeeds only on conclusion `success`.
 
-Use `-NoWait` only when the user asks to dispatch without waiting. Return the direct Actions run link, run ID, exact SHA, and conclusion. A failed, cancelled, timed-out, ambiguous, or mismatched run is a stop condition; do not start NativeSim afterward.
+Use `-NoWait` only when the user asks to dispatch without waiting. Return whether the run was reused or newly dispatched, its direct Actions link, run ID, exact SHA, and conclusion. A failed, cancelled, timed-out, ambiguous, or mismatched run is a stop condition; do not start NativeSim afterward.

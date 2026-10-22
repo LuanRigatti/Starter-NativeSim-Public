@@ -13,7 +13,7 @@
     "test": "jest --runInBand",
     "expo:check": "expo install --check",
     "doctor": "npx expo-doctor",
-    "postinstall": "node scripts/patch-expo-ui-bottom-sheet.js",
+    "postinstall": "node scripts/patch-expo-ui-bottom-sheet.js && node scripts/patch-expo-module-scan-timeout.js",
     "patch:bottom-sheet": "node scripts/patch-expo-ui-bottom-sheet.js"
   },
   "dependencies": {

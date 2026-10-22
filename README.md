@@ -63,25 +63,26 @@ O Starter privado é a fonte da verdade. O espelho público é atualizado em uma
     git -C C:\Projetos\Starter-NativeSim-Public diff --cached
     pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\mirror-starter.ps1 -Publish
 
-A skill `mirror-starter` descreve revisão do diff e publicação. A skill `starter-nativesim` executa Swift Preflight no SHA público exato e inicia o streaming. A skill `starter-swift-preflight` executa o gate isoladamente. A skill `starter-simulator-archive` compila, exporta e valida o `.app.tar.gz` do run atual.
+A skill `$starter-nativesim` é o fluxo principal: verifica o Starter privado, publica no espelho apenas quando a allowlist e as auditorias passam, reutiliza ou executa Swift Preflight no SHA público exato, inicia uma sessão NativeSim de 120 minutos enviando `export_app=true` e entrega os links assim que ficam disponíveis. A invocação explícita autoriza o push necessário somente ao espelho público. A CLI opera numa cópia temporária com push redirecionado a um repositório local; ela é encerrada antes do seu download local, enquanto o workflow remoto exporta e publica o artifact, instala e abre o Starter e mantém o stream ativo.
+
+A skill `$mirror-starter` continua disponível para preview e publicação independente. A skill `$starter-swift-preflight` executa isoladamente o gate e reutiliza apenas uma aprovação exata. A skill `$starter-simulator-archive` baixa um artifact existente assim que compilação, exportação e upload terminarem, mesmo que a sessão NativeSim ainda esteja ativa; não inicia Preflight, sessão ou nova build.
 
 Para executar somente Swift Preflight:
 
     pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-StarterSwiftPreflight.ps1
 
-Para iniciar uma sessão NativeSim (o launcher executa Swift Preflight antes):
+Para iniciar o fluxo completo, use `$starter-nativesim`. O comando direto abaixo é equivalente; a duração omitida é 120 minutos e um valor solicitado pode ser informado entre 1 e 350:
 
-    pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-StarterNativeSim.ps1 -Minutes 30
+    pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-StarterNativeSim.ps1
 
-Para compilar com exportação `.app.tar.gz`:
+O launcher solicita a geração do archive sem aguardar a compilação, o upload ou o fim da sessão. Assim que os links completos e a identidade do run são verificados, ele encerra o processo local da CLI; o workflow remoto e o túnel permanecem ativos. A chave `k` é entregue somente na resposta privada e nunca é reconstruída ou gravada em logs, workflow, commits ou documentação.
 
-    pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-StarterNativeSim.ps1 -Minutes 30 -ExportArchive
+Quando o artifact estiver disponível, localize o run mais recente elegível ou informe seu ID para baixar o arquivo já existente:
 
-Depois da conclusão do CLI, use o ID numérico presente na URL do GitHub Actions para baixar uma cópia verificada:
-
+    pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Download-StarterSimulatorArchive.ps1
     pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Download-StarterSimulatorArchive.ps1 -RunId <RUN_ID>
 
-O artefato é um arquivo .app.tar.gz, preservado como tar para manter permissões e symlinks. A retenção é de um dia. Os arquivos YAML declaram `workflow_dispatch`; nenhuma sessão ou compilação deve começar sem pedido explícito.
+O artifact é um arquivo `.app.tar.gz`, preservado como tar para manter permissões e symlinks, com retenção configurada de sete dias (sujeita a um limite menor do repositório/organização). O script de download valida o run, o SHA, as etapas de compilação/exportação/upload e a integridade do tar antes de salvar em `artifacts\<RUN_ID>`. Os workflows declaram `workflow_dispatch`; nenhuma sessão ou compilação começa sem pedido explícito.
 
 Na preparação inicial, o GitHub registrou alguns checks de `push` no Starter privado como falhas sem jobs, sem check runs e sem logs. Nenhum runner ou build começou. Esses registros não apareceram no espelho público; confira a aba Actions antes do primeiro dispatch manual.
 

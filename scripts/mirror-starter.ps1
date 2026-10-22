@@ -13,20 +13,21 @@ $expectedDestination = [IO.Path]::GetFullPath('C:\Projetos\Starter-NativeSim-Pub
 if ($sourceRoot -ne $expectedSource -or $destinationRoot -ne $expectedDestination) {
   throw 'Resolved paths are outside the two authorized Starter folders.'
 }
-if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container) -or
-    -not (Test-Path -LiteralPath $destinationRoot -PathType Container)) {
-  throw 'Both Starter and Starter-NativeSim-Public folders must already exist.'
-}
+Import-Module (Join-Path $PSScriptRoot 'StarterMirrorSecurity.psm1') -Force -DisableNameChecking -ErrorAction Stop
+$sourceRoot = Assert-StarterMirrorRoot -Root $sourceRoot
+$destinationRoot = Assert-StarterMirrorRoot -Root $destinationRoot
 
 $allowedFiles = @(
   'README.md','AI_CONTEXT.md','AGENTS.md','.gitignore','.nativesim-source',
   'app.config.js','babel.config.js','eas.json','eslint.config.js','expo-env.d.ts',
   'index.ts','jest.config.js','metro.config.js','package.json','package-lock.json','tsconfig.json',
   'plugins/withStarterToolbarSync.js',
-  'scripts/patch-expo-ui-bottom-sheet.js','scripts/verify-starter-native.js',
+  'scripts/patch-expo-ui-bottom-sheet.js','scripts/patch-expo-module-scan-timeout.js',
+  'scripts/verify-starter-native.js',
   'scripts/create-provisional-icon.ps1',
   'scripts/mirror-starter.ps1','scripts/Invoke-StarterSwiftPreflight.ps1',
   'scripts/Start-StarterNativeSim.ps1','scripts/Download-StarterSimulatorArchive.ps1',
+  'scripts/StarterMirrorSecurity.psm1','scripts/StarterNativeSimCliGuard.psm1',
   '.github/workflows/native-sim.yml','.github/workflows/swift-preflight.yml',
   '.github/workflows/eas-build.yml','.github/native-sim/gate.cjs'
 )
@@ -70,21 +71,26 @@ function Get-CandidateFiles {
   $result = [Collections.Generic.List[string]]::new()
   foreach ($relative in $allowedFiles) {
     if ($relative -eq '.nativesim-source') { continue }
-    $path = Join-Path $sourceRoot $relative.Replace('/','\')
-    if (Test-Path -LiteralPath $path -PathType Leaf) { $result.Add($relative) }
+    $path = Resolve-StarterMirrorPath -Base $sourceRoot -RelativePath $relative -ExpectedType File -AllowMissingLeaf
+    if ($null -ne $path) { $result.Add($relative) }
   }
   foreach ($relativeDirectory in $allowedDirectories) {
-    $path = Join-Path $sourceRoot $relativeDirectory.Replace('/','\')
-    if (-not (Test-Path -LiteralPath $path -PathType Container)) { continue }
-    foreach ($item in Get-ChildItem -LiteralPath $path -File -Recurse -Force) {
-      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Linked/reparse file is excluded from the mirror: $($item.FullName)"
-      }
-      $result.Add((Get-RelativePath -Base $sourceRoot -FullPath $item.FullName))
-    }
-    foreach ($item in Get-ChildItem -LiteralPath $path -Directory -Recurse -Force) {
-      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Linked/reparse directory is excluded from the mirror: $($item.FullName)"
+    $path = Resolve-StarterMirrorPath -Base $sourceRoot -RelativePath $relativeDirectory -ExpectedType Directory -AllowMissingLeaf
+    if ($null -eq $path) { continue }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($relativeDirectory)
+    while ($pending.Count -gt 0) {
+      $currentRelative = $pending.Pop()
+      $currentPath = Resolve-StarterMirrorPath -Base $sourceRoot -RelativePath $currentRelative -ExpectedType Directory
+      foreach ($item in Get-ChildItem -LiteralPath $currentPath -Force -ErrorAction Stop) {
+        $itemRelative = Get-RelativePath -Base $sourceRoot -FullPath $item.FullName
+        $expectedType = if ($item.PSIsContainer) { 'Directory' } else { 'File' }
+        $null = Resolve-StarterMirrorPath -Base $sourceRoot -RelativePath $itemRelative -ExpectedType $expectedType
+        if ($item.PSIsContainer) {
+          $pending.Push($itemRelative)
+        } else {
+          $result.Add($itemRelative)
+        }
       }
     }
   }
@@ -98,8 +104,8 @@ function Assert-SafeFiles {
       throw "File is outside the publication allowlist: $normalized"
     }
     if ($normalized -match $blockedNamePattern) { throw "Blocked file name: $normalized" }
-    $fullPath = Join-Path $Base $normalized.Replace('/','\')
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { continue }
+    $fullPath = Resolve-StarterMirrorPath -Base $Base -RelativePath $normalized -ExpectedType File -AllowMissingLeaf
+    if ($null -eq $fullPath) { continue }
     if ([IO.Path]::GetExtension($fullPath) -in @('.png','.jpg','.jpeg','.webp','.pdf','.zip','.tar','.gz')) { continue }
     $text = Get-Content -LiteralPath $fullPath -Raw -ErrorAction Stop
     foreach ($pattern in $secretPatterns) {
@@ -118,13 +124,18 @@ function Assert-Remote {
   if ($remote -notmatch "(?i)(?:github\.com[:/])LuanRigatti/$([regex]::Escape($ExpectedSlug))(?:\.git)?$") {
     throw "origin is not LuanRigatti/$ExpectedSlug : $remote"
   }
+  $pushRemote = (Invoke-Git -Repository $Repository -GitArguments @('remote','get-url','--push','origin')) -join $nl
+  if ($pushRemote -notmatch "(?i)(?:github\.com[:/])LuanRigatti/$([regex]::Escape($ExpectedSlug))(?:\.git)?$") {
+    throw "origin push URL is not LuanRigatti/$ExpectedSlug : $pushRemote"
+  }
 }
 function Assert-GitRoot {
   param([string]$Repository)
   $actual = [IO.Path]::GetFullPath(((Invoke-Git -Repository $Repository -GitArguments @('rev-parse','--show-toplevel')) -join $nl).Trim())
   if ($actual -ne [IO.Path]::GetFullPath($Repository)) { throw "Unexpected Git root: $actual" }
+  $item = Get-Item -LiteralPath $Repository -Force
+  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Git root is a linked/reparse path: $Repository" }
 }
-
 $sourceBranch = ((Invoke-Git $sourceRoot @('branch','--show-current')) -join '').Trim()
 if ($sourceBranch -ne 'main') { throw "Starter source must be on main; found $sourceBranch." }
 Assert-GitRoot $sourceRoot
@@ -146,38 +157,71 @@ if ($LASTEXITCODE -ne 0 -or $publicVisibility.ToUpperInvariant() -ne 'PUBLIC') {
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $destinationRoot '.git'))) {
-  & git -C $destinationRoot init -b main
-  if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the mirror Git repository.' }
-  & git -C $destinationRoot remote add origin https://github.com/LuanRigatti/Starter-NativeSim-Public.git
-  if ($LASTEXITCODE -ne 0) { throw 'Could not configure public mirror origin.' }
+  throw 'The public mirror folder must already be an initialized Git checkout; refusing to initialize or replace it.'
 }
 Assert-GitRoot $destinationRoot
 Assert-Remote $destinationRoot 'Starter-NativeSim-Public'
 $destinationBranch = ((Invoke-Git $destinationRoot @('branch','--show-current')) -join '').Trim()
 if ($destinationBranch -ne 'main') { throw "Public mirror must be on main; found $destinationBranch." }
+$destinationStatus = (Invoke-Git $destinationRoot @('status','--porcelain=v1','--untracked-files=all')) -join $nl
+if ($destinationStatus.Trim() -and -not $Publish) { throw 'Public mirror worktree must be clean before creating a mirror preview.' }
+$hasStagedPreview = [bool]$destinationStatus.Trim()
+if ($hasStagedPreview) {
+  $previewUnstaged = (Invoke-Git $destinationRoot @('diff','--name-only')) -join $nl
+  $previewUntracked = @(Invoke-Git $destinationRoot @('ls-files','--others','--exclude-standard'))
+  if ($previewUnstaged.Trim() -or $previewUntracked.Count) {
+    throw 'An automatic publish can consume only a clean, script-generated staged preview; unstaged or untracked files exist.'
+  }
+}
+$destinationHead = ((Invoke-Git $destinationRoot @('rev-parse','HEAD')) -join '').Trim()
+if ($destinationHead -notmatch '^[0-9a-f]{40}$') { throw 'Public mirror main has no valid local commit; refusing replacement.' }
+$destinationLive = ((Invoke-Git $destinationRoot @('ls-remote','origin','refs/heads/main')) -join $nl).Trim()
+if (-not $destinationLive -or $destinationLive.Split()[0] -ne $destinationHead) {
+  throw 'Public mirror local main must exactly match live origin/main before mirroring.'
+}
 
 $candidates = Get-CandidateFiles
 if ($candidates.Count -lt 1) { throw 'The mirror allowlist produced no files.' }
 Assert-SafeFiles $sourceRoot $candidates
-foreach ($relative in $candidates) {
-  $sourcePath = Join-Path $sourceRoot $relative.Replace('/','\')
-  $destinationPath = Join-Path $destinationRoot $relative.Replace('/','\')
-  $parent = Split-Path -Parent $destinationPath
-  if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
-  Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
-}
-$provenance = @(
+$expectedProvenance = @(
   'source_repository=LuanRigatti/Starter'
   'source_branch=main'
   "source_commit=$sourceSha"
 ) -join $nl
-Set-Content -LiteralPath (Join-Path $destinationRoot '.nativesim-source') -Value $provenance -Encoding utf8
+if ($hasStagedPreview) {
+  $previewPaths = @(Invoke-Git $destinationRoot @('diff','--cached','--name-only'))
+  foreach ($relative in $previewPaths) {
+    if (-not (Test-AllowedRelativePath $relative) -and $relative -ne '.nativesim-source') {
+      throw "Staged preview includes a path outside the allowlist: $relative"
+    }
+  }
+  foreach ($relative in $candidates) {
+    $sourceFile = Resolve-StarterMirrorPath -Base $sourceRoot -RelativePath $relative -ExpectedType File
+    $previewFile = Resolve-StarterMirrorPath -Base $destinationRoot -RelativePath $relative -ExpectedType File -AllowMissingLeaf
+    if ($null -eq $previewFile -or
+        (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $previewFile -Algorithm SHA256).Hash) {
+      throw "Staged preview does not exactly match the current private source snapshot: $relative"
+    }
+  }
+  $previewProvenancePath = Resolve-StarterMirrorPath -Base $destinationRoot -RelativePath '.nativesim-source' -ExpectedType File
+  $previewProvenance = Get-Content -LiteralPath $previewProvenancePath -Raw
+  if ($previewProvenance.TrimEnd([char[]]@("`r","`n")) -ne $expectedProvenance) {
+    throw 'Staged preview provenance does not match the current private source commit.'
+  }
+}
+foreach ($relative in $candidates) {
+  $null = Copy-StarterMirrorFile -SourceRoot $sourceRoot -MirrorRoot $destinationRoot -RelativePath $relative
+}
+$provenance = $expectedProvenance
+$null = Write-StarterProvenance -MirrorRoot $destinationRoot -Content $provenance
 $candidates = @($candidates + '.nativesim-source' | Sort-Object -Unique)
 Assert-SafeFiles $destinationRoot $candidates
 
 $knownPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($relative in $candidates) { [void]$knownPaths.Add($relative) }
-$destinationEntries = Invoke-Git $destinationRoot @('ls-files','-co','--exclude-standard')
+$destinationEntries = @(Invoke-Git $destinationRoot @('ls-files','-co','--exclude-standard'))
+$destinationEntries += @(Invoke-Git $destinationRoot @('diff','--cached','--name-only'))
+$destinationEntries = @($destinationEntries | Sort-Object -Unique)
 $stalePaths = [Collections.Generic.List[string]]::new()
 foreach ($entry in $destinationEntries) {
   $relative = $entry.Replace('\','/')
@@ -185,11 +229,8 @@ foreach ($entry in $destinationEntries) {
   if ((Test-AllowedRelativePath $relative) -and -not $knownPaths.Contains($relative)) { $stalePaths.Add($relative) }
 }
 foreach ($relative in $stalePaths) {
-  $full = [IO.Path]::GetFullPath((Join-Path $destinationRoot $relative.Replace('/','\')))
-  if (-not $full.StartsWith($destinationRoot + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing stale path outside the mirror: $relative"
-  }
-  if (Test-Path -LiteralPath $full -PathType Leaf) { Remove-Item -LiteralPath $full }
+  $full = Resolve-StarterMirrorPath -Base $destinationRoot -RelativePath $relative -ExpectedType File -AllowMissingLeaf
+  if ($null -ne $full) { Remove-Item -LiteralPath $full }
 }
 
 $stagePaths = @($candidates + $stalePaths | Sort-Object -Unique | ForEach-Object { ':(literal)' + $_ })
@@ -213,15 +254,22 @@ Write-Output "Source SHA: $sourceSha"
 Write-Output "Allowlisted files: $($candidates.Count)"
 Write-Output "Stale allowlisted files removed: $($stalePaths.Count)"
 Write-Output 'Credential and previous-application scan: passed'
-Write-Output 'Review the staged diff before using -Publish.'
+Write-Output 'Added, changed, and removed paths:'
+& git -C $destinationRoot diff --cached --name-status
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the staged mirror path changes.' }
+if ($Publish) {
+  Write-Output 'The exact staged snapshot passed the allowlist, provenance, credential, and previous-application checks.'
+} else {
+  Write-Output 'Review the staged diff before using -Publish.'
+}
 & git -C $destinationRoot diff --cached --stat
 if (-not $Publish) {
   Write-Output 'Preview only: no commit or push was performed.'
-  exit 0
+  return
 }
 if (-not $stagedPaths.Count) {
   Write-Output 'The public mirror already matches this source snapshot; no commit or push is needed.'
-  exit 0
+  return
 }
 
 $hasHead = $true
@@ -260,4 +308,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Normal fast-forward push failed; no force push
 $publishedSha = ((Invoke-Git $destinationRoot @('rev-parse','HEAD')) -join '').Trim()
 $remoteAfter = ((Invoke-Git $destinationRoot @('ls-remote','origin','refs/heads/main')) -join $nl).Trim()
 if (-not $remoteAfter -or $remoteAfter.Split()[0] -ne $publishedSha) { throw 'Post-push remote SHA verification failed.' }
+$finalStatus = (Invoke-Git $destinationRoot @('status','--porcelain=v1','--untracked-files=all')) -join $nl
+if ($finalStatus.Trim()) { throw 'Public mirror is not clean after the successful mirror push.' }
 Write-Output "Published source $sourceSha as mirror commit $publishedSha."

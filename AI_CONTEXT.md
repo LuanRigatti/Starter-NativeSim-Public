@@ -29,8 +29,12 @@ O app funciona sem login, conexão, Firebase ou serviço de dados. O conteúdo d
 
 - plugins/withStarterToolbarSync.js adapta o patch de react-native-screens 4.30.0 que sincroniza propriedade hidesBottomBarWhenPushed e ownership de toolbars compartilhadas durante navegação e morph.
 - scripts/patch-expo-ui-bottom-sheet.js adiciona ignoresSafeArea(.container, edges: .bottom) ao BottomSheetView.swift de @expo/ui 58.0.19.
+- `scripts/patch-expo-module-scan-timeout.js` aplica, com versão e ponto de patch verificados, o timeout de 30 segundos ao scanner Apple de `expo-modules-autolinking` 58.0.14. O limite upstream de 5 segundos causou a falha observada no Release; o scan continua obrigatório e ainda falha se não concluir dentro do novo prazo.
 - O workflow Swift Preflight verifica o plugin, o patch e compila um app iOS Simulator sem assinatura.
 - NativeSim usa o workflow manual do espelho público, túnel Cloudflare e gate autenticado. Nenhum token ou credencial permanente é necessário para o stream HTTP.
+- `$starter-nativesim` é a skill principal de execução: exige a origem privada limpa e publicada, espelha automaticamente por allowlist quando necessário, reutiliza ou aguarda Preflight aprovado para o SHA exato, e inicia uma sessão pública de 120 minutos com exportação do artifact habilitada.
+- A sessão NativeSim usa a CLI instalada numa cópia temporária do espelho, com push redirecionado a um sink local no mesmo SHA. Antes de publicar, o launcher executa `tests/StarterSecurity.Tests.ps1`, que usa somente fixtures temporárias e `gh` simulado. Antes de `up`, inspeciona o scaffold e o comportamento de commit automático da CLI instalada, verifica os templates do workflow e do gate, valida `gate.cjs` contra seu conteúdo normalizado aprovado e simula o scaffold real no clone isolado. A prévia deve preservar os dois arquivos gerados, o Git status e o HEAD; hashes, SHA e sink são verificados outra vez após a saída da CLI. `--export` envia `export_app=true`; após validar run ID, branch, SHA e ambos os links, o launcher encerra a CLI antes do download local. A execução remota exporta e publica o artifact, instala e abre o app, e mantém o stream ativo. A URL autenticada com `k` só é entregue ao usuário e nunca persistida.
+- `$starter-simulator-archive` baixa um artifact existente assim que build, export e upload forem concluídos com sucesso, inclusive durante uma sessão ativa. Confirma identidade do run, SHA, nome e integridade do `.app.tar.gz`; nunca inicia Preflight, sessão ou build.
 
 ## Configuração e versões
 

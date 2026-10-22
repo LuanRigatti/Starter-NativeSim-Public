@@ -18,6 +18,6 @@ Depois de alterações, executar npm run typecheck, npm run lint e npm test -- -
 
 ## NativeSim e publicação pública
 
-Starter é a fonte privada da verdade; Starter-NativeSim-Public é espelho unidirecional filtrado. Use scripts/mirror-starter.ps1 e a allowlist documentada. Nunca copie .env, credenciais, certificados, dados pessoais ou histórico Git da fonte. Nunca receba alterações do espelho público de volta ao privado. Antes de publicar, examine o diff e execute a auditoria de segurança incluída.
+Starter é a fonte privada da verdade; Starter-NativeSim-Public é espelho unidirecional filtrado. Use scripts/mirror-starter.ps1 e a allowlist documentada. Nunca copie .env, credenciais, certificados, dados pessoais ou histórico Git da fonte. Nunca receba alterações do espelho público de volta ao privado. O uso independente de `$mirror-starter` continua em modo preview/revisão; uma invocação explícita de `$starter-nativesim` autoriza o script a publicar no espelho público quando todos os gates automáticos passarem. O script mostra arquivos adicionados, alterados e removidos, valida a allowlist e os scanners, exige o destino limpo e sincronizado, e confirma a proveniência após push.
 
-Não usar force push. Não executar workflow, EAS build, prebuild local ou NativeSim sem solicitação explícita do usuário.
+Não usar force push. Não executar workflow, EAS build, prebuild local ou NativeSim sem solicitação explícita do usuário. `$starter-nativesim` inicia uma sessão pública de 120 minutos por padrão, reutiliza Swift Preflight aprovado somente para o SHA exato, habilita exportação do archive e encerra a CLI local quando os dois links aparecem. Não persistir a URL autenticada ou sua chave; o workflow remoto continua após a entrega privada dos links.

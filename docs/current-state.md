@@ -27,6 +27,7 @@ NativeTabs usa o módulo estável `expo-router/native-tabs` e `NativeTabs.Trigge
 - Reanimated, Gesture Handler, navegação push/pop e gesto nativo de retorno.
 - `plugins/withStarterToolbarSync.js`, direcionado a `react-native-screens` 4.30.0.
 - `scripts/patch-expo-ui-bottom-sheet.js`, aplicado após instalar `@expo/ui`; corrige a área segura inferior do BottomSheet SwiftUI.
+- `scripts/patch-expo-module-scan-timeout.js`, aplicado no `postinstall`, altera o timeout hard-coded do scanner Apple em `expo-modules-autolinking` 58.0.14 de 5 para 30 segundos. A alteração é limitada à versão travada, falha fechada se o pacote ou o trecho mudar, preserva a descoberta dos módulos e mantém erro quando o scan excede o prazo. O motivo de o scanner ter passado de 5 segundos no runner Release ainda não foi isolado; a correção aguarda nova validação nativa autorizada.
 
 ## Telas e configuração
 
@@ -37,11 +38,12 @@ Nome, slug e scheme são `Starter`, `starter` e `starter`. O bundle ID é `com.l
 ## Workflows e skills
 
 - `swift-preflight.yml`: workflow manual para dependências, Expo, TypeScript, ESLint, testes, prebuild no runner macOS, Pods, patches e compilação Simulator sem assinatura.
-- `native-sim.yml`: workflow manual compatível com o CLI NativeSim instalado; protege o streaming com gate, compila e instala o app sem certificado, e pode empacotar `.app.tar.gz` como artifact GitHub com retenção de um dia.
+- `native-sim.yml`: workflow manual compatível com a CLI NativeSim instalada; protege o streaming com gate, compila e instala o app sem certificado, exporta `.app.tar.gz` para artifact GitHub com retenção configurada de sete dias e aceita duração de 1 a 350 minutos. A duração padrão do fluxo Starter é 120 minutos; o timeout do job permanece em 360 minutos.
 - `eas-build.yml`: workflow separado, manual e Simulator-only; exige token e ID de um projeto EAS novo configurados no repositório antes de qualquer build.
+- `$starter-nativesim` é a skill principal: valida o Starter privado, roda `tests/StarterSecurity.Tests.ps1` com fixtures temporárias e `gh` simulado antes da publicação, publica o espelho somente com gates aprovados, reutiliza ou executa Swift Preflight para o SHA exato, envia `export_app=true`, inicia NativeSim e devolve os dois links completos antes do download local. O launcher verifica o scaffold real da CLI no clone isolado, valida as versões do workflow e do gate, compara o gate com o conteúdo aprovado após a normalização controlada, e confirma hashes/SHA/sink antes e depois da CLI. `$mirror-starter` rejeita reparse points em toda a origem e destino, incluindo ancestrais, e copia arquivos e grava a proveniência por substituição atômica para não seguir hard links no destino. O workflow remoto exporta e publica o artifact, instala e abre o app e mantém o stream ativo. `$mirror-starter` permanece para uso independente; `$starter-simulator-archive` baixa o artifact existente quando build/export/upload passam, inclusive com a sessão ainda ativa, sem iniciar outra execução.
 - Skills locais em `.agents/skills/`: `mirror-starter`, `starter-nativesim`, `starter-swift-preflight` e `starter-simulator-archive`.
 
-Nenhuma sessão NativeSim, build EAS ou compilação/prebuild nativo local foi iniciada. Na preparação, o GitHub registrou nove checks `push` falhos no Starter privado, distribuídos pelos três workflows e três SHAs antigos. A API retornou zero jobs e zero check runs em todos os nove; os logs não existem. Os YAML declaram somente `workflow_dispatch`. Nenhum registro apareceu no espelho público. Investigar esses checks vazios antes do primeiro dispatch manual.
+Esta atualização de skill/scripts não iniciou sessão NativeSim, build EAS, Swift Preflight ou compilação/prebuild nativo local. Na preparação inicial, o GitHub registrou nove checks `push` falhos no Starter privado, distribuídos pelos três workflows e três SHAs antigos. A API retornou zero jobs e zero check runs em todos os nove; os logs não existem. Os YAML declaram somente `workflow_dispatch`. Nenhum registro apareceu no espelho público. Trate esses checks como histórico sem jobs; não os use como resultado de build.
 
 ## Validação local
 
@@ -53,6 +55,7 @@ Nenhuma sessão NativeSim, build EAS ou compilação/prebuild nativo local foi i
 - Jest: 4 testes passaram.
 - Verificação dos contratos nativos: passou.
 - Workflows YAML, sintaxe PowerShell e frontmatter/nome das quatro skills: passaram em verificações estruturais locais.
+- `tests/StarterSecurity.Tests.ps1`: simula reparse points, escrita de proveniência redirecionada, scaffold NativeSim, gates de Preflight/sessões/URL/export e validação do archive.
 - Validador oficial `quick_validate.py` das skills ficou pendente porque PyYAML não está instalado; nenhuma dependência extra foi instalada para contornar isso.
 
 ## Segurança e limites de evidência

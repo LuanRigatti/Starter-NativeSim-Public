@@ -1,11 +1,11 @@
 ---
 name: mirror-starter
-description: Review and publish the approved Starter main snapshot one way to Starter-NativeSim-Public after the allowlist and security gates pass. Use only when the user asks to mirror or publish Starter to its NativeSim mirror.
+description: Preview and independently publish the approved Starter main snapshot one way to Starter-NativeSim-Public. The primary $starter-nativesim flow also invokes the audited mirror script automatically.
 ---
 
 # Mirror Starter to NativeSim Public
 
-Use this skill only for an explicit request to mirror/publish Starter, or an explicit `$mirror-starter` invocation. Skill inspection, documentation, and preparation do not authorize publication.
+Use this skill for an explicit request to mirror/publish Starter, or an explicit `$mirror-starter` invocation. It remains the standalone preview-and-review flow. The explicit `$starter-nativesim` invocation authorizes its separate automated `-Publish` use after every script gate passes.
 
 ## Fixed repositories
 
@@ -17,6 +17,14 @@ Use this skill only for an explicit request to mirror/publish Starter, or an exp
 ## Publish flow
 
 Run in PowerShell 7 or later from the Starter folder:
+
+Run the offline mirror/NativeSim security simulations first; they use temporary local fixtures and a mocked `gh` command and do not publish or dispatch workflows:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\StarterSecurity.Tests.ps1
+```
+
+Stop if the test exits unsuccessfully. Then preview the mirror:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\mirror-starter.ps1
@@ -38,7 +46,7 @@ When those checks pass, publish the reviewed snapshot:
 pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\mirror-starter.ps1 -Publish
 ```
 
-The script creates a mirror commit and uses a normal fast-forward push. It verifies the source commit, public remote SHA, and visibility. It never force-pushes. Stop if any gate fails; do not work around a failed allowlist or scanner result.
+The script requires the private source and public destination to be clean and the public local `main` to equal live `origin/main` before copying. Before reading, enumerating, copying, deleting, or writing it validates every path component from the volume/share root through the authorized repository root, and rejects symlinks, junctions, other reparse points, unresolved paths, and escapes. It prints added, changed, and removed paths; scans the allowlist for credentials and blocked references; and uses only a normal fast-forward push. Each copied file and `.nativesim-source` is written to a validated same-directory temporary file created exclusively, then atomically replaced, so an existing hard link cannot redirect writes outside the mirror. It verifies provenance, remote equality, and a clean destination afterward. It never force-pushes. Stop if any gate fails; do not work around a failed allowlist or scanner result.
 
 ## Report
 

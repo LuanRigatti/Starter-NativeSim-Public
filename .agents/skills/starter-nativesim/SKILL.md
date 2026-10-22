@@ -1,11 +1,11 @@
 ---
 name: starter-nativesim
-description: Run the exact-SHA Swift Preflight and start one authenticated NativeSim iOS Simulator session for the published Starter-NativeSim-Public main commit. Use only for an explicit NativeSim request.
+description: Safely mirror the clean published Starter source, reuse or run exact-SHA Swift Preflight, and start one 120-minute authenticated NativeSim session. Use for an explicit $starter-nativesim request.
 ---
 
-# Starter NativeSim session
+# Starter NativeSim — primary flow
 
-Use only when the user explicitly asks to start NativeSim or invokes `$starter-nativesim`. Preparing or explaining the skill does not authorize a session. A session dispatch consumes hosted macOS workflow time; start at most one session for the requested SHA.
+Use only for an explicit `$starter-nativesim` invocation or direct request to start the Starter Simulator. That invocation authorizes the audited one-way mirror publication when needed. Do not ask for an intermediate confirmation when every gate passes. Stop on any failed or ambiguous gate.
 
 ## Fixed target
 
@@ -15,16 +15,16 @@ Use only when the user explicitly asks to start NativeSim or invokes `$starter-n
 
 ## Run
 
-From `C:\Projetos\Starter-NativeSim-Public`, with PowerShell 7, GitHub CLI authentication, and NativeSim installed:
+Run from `C:\Projetos\Starter` with PowerShell 7, GitHub CLI authentication, and the installed NativeSim CLI. The private `main` must be clean and equal to `origin/main`; never commit or push it. Before publication, the launcher runs `tests/StarterSecurity.Tests.ps1`, which uses temporary local fixtures and a mocked GitHub CLI for its Preflight reuse case; it does not dispatch a workflow or start a session. The launcher then invokes `mirror-starter.ps1 -Publish`, which rechecks both repositories, visibility, exact remotes, destination cleanliness and SHA, allowlist, credential/reference scans, staged paths, fast-forward history, provenance, and post-push equality. It commits and pushes only to the public mirror when files differ. A dirty/unpublished private source, dirty/divergent public checkout, failed test or scan, or unexpected path stops the flow.
 
 ```powershell
-pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\Start-StarterNativeSim.ps1 -Minutes 30
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\Start-StarterNativeSim.ps1
 ```
 
-The launcher checks both clean `main` checkouts and their live remotes, repository visibility, mirror provenance, NativeSim workflow/gate files, and duplicate runs. It dispatches and waits for Swift Preflight against the exact public mirror SHA. It starts NativeSim only after Preflight succeeds and rechecks that the public SHA did not move. NativeSim is invoked through the installed `native-sim.ps1` CLI with `--public --no-open`; do not run `src/cli.js` directly, edit the workflow, create a session key, or reconstruct a stream URL.
+The launcher reuses an active or successful Swift Preflight only when the GitHub repository, workflow path, `workflow_dispatch` event, `main` branch, exact public SHA, and success conclusion all match. Otherwise it dispatches once and waits for that SHA to pass. A failure blocks NativeSim. It then rechecks source/mirror SHA and provenance, refuses any active NativeSim run on `main`, and starts the installed `native-sim.ps1` CLI with the validated iPhone 17 Pro, Starter scheme, public tunnel, `--export`, and default `--minutes 120`. The launcher verifies the installed CLI maps `--export` to the workflow input `export_app=true` and prints both links before entering its local artifact wait. A requested valid `-Minutes` value from 1 through 350 is honored.
 
-To also have NativeSim download its artifact automatically after the session becomes available, add `-ExportArchive`. For a separate GitHub CLI download and exact-run verification, use the `starter-simulator-archive` skill.
+The CLI runs in a disposable clone pinned to the public SHA. Its fetch URL identifies the public GitHub repository, while its push URL points to a temporary local bare sink seeded with that same SHA. Before `native-sim up`, the launcher inspects the installed CLI's real scaffold and auto-commit behavior, checks both workflow and gate template versions, verifies `gate.cjs` against the installed template with only the approved `TOKEN` to `GATE_VALUE` rename, and runs the actual scaffold function against the isolated clone. The scaffold must leave workflow, gate, Git status, and HEAD byte-for-byte unchanged. The launcher checks the same file hashes, clone SHA, clean status, and local push sink again after CLI output. The workflow must be active and compatible; never modify the global CLI or workflow to make a run proceed.
 
-To inspect the recorded session later, run `native-sim.ps1 status` from the public mirror folder. To end a session early, use `native-sim.ps1 down` only when the user explicitly asks to stop it. Never reconstruct or report a keyed stream URL from GitHub status or session metadata.
+The CLI's output is captured privately in memory. Return the full GitHub Actions URL and the exact authenticated Simulator URL printed by this invocation, including the complete `k` value. Never reconstruct, shorten, log, or save that authenticated URL/key. Confirm the run ID, `main`, exact public SHA, Preflight outcome, 120-minute (or requested) duration, and one-time initial workflow/build status. Persist only the CLI's validated non-secret session metadata under the public checkout's Git metadata when available.
 
-Return only the full Actions and simulator URLs emitted by this invocation, plus public SHA and Preflight outcome. Never persist the simulator key in files, logs, environment variables, or GitHub status. Do not report a live session until the CLI emits its complete simulator URL.
+As soon as both links and run identity are verified, terminate only the local CLI process tree and return, before its separate artifact wait/download. GitHub Actions continues the same build, exports and uploads the `.app.tar.gz`, installs and opens Starter, then keeps the stream available for the requested session duration. Do not wait for any of those remote steps or poll logs. If an active NativeSim run already exists, stop and report its Actions link without attempting to recover or invent its key. For later artifact retrieval, use `$starter-simulator-archive`; it can download as soon as that run's build, export, and upload steps succeed, even while the 120-minute stream remains active.

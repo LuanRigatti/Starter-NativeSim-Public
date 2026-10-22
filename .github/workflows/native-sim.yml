@@ -14,7 +14,7 @@ on:
         required: true
       minutes:
         description: Stream duration, up to 350 minutes
-        default: "30"
+        default: "120"
       device:
         description: iOS Simulator device
         default: iPhone 17 Pro
@@ -257,7 +257,7 @@ jobs:
           name: native-sim-app-${{ inputs.session }}
           path: build/*.app.tar.gz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
       - name: Install and launch Starter
         env:
