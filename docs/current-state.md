@@ -41,7 +41,7 @@ Nome, slug e scheme são `Starter`, `starter` e `starter`. O bundle ID é `com.l
 - `eas-build.yml`: workflow separado, manual e Simulator-only; exige token e ID de um projeto EAS novo configurados no repositório antes de qualquer build.
 - Skills locais em `.agents/skills/`: `mirror-starter`, `starter-nativesim`, `starter-swift-preflight` e `starter-simulator-archive`.
 
-Os workflows não foram executados nesta preparação. Nenhuma sessão NativeSim, build EAS ou compilação/prebuild nativo local foi iniciada.
+Nenhuma sessão NativeSim, build EAS ou compilação/prebuild nativo local foi iniciada. Na preparação, o GitHub registrou nove checks `push` falhos no Starter privado, distribuídos pelos três workflows e três SHAs antigos. A API retornou zero jobs e zero check runs em todos os nove; os logs não existem. Os YAML declaram somente `workflow_dispatch`. Nenhum registro apareceu no espelho público. Investigar esses checks vazios antes do primeiro dispatch manual.
 
 ## Validação local
 

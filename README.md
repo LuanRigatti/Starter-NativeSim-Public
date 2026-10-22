@@ -32,6 +32,24 @@ O Metro e os fallbacks funcionam em Expo Go. Os controles SwiftUI e o plugin de 
 
 Não declarar o comportamento visual nativo validado até executar o app em iOS Simulator ou iPhone.
 
+## Criar outro aplicativo
+
+Use o Starter como base e mantenha o novo app em outra pasta e repositório. Para criar um clone com remoto próprio:
+
+```powershell
+gh auth status
+gh repo create LuanRigatti/MeuApp --private
+git clone https://github.com/LuanRigatti/Starter.git C:\Projetos\MeuApp
+git -C C:\Projetos\MeuApp remote set-url origin https://github.com/LuanRigatti/MeuApp.git
+git -C C:\Projetos\MeuApp push -u origin main
+```
+
+Esse fluxo mantém a linhagem de commits do Starter. Se precisar de histórico inicial separado, crie o repositório a partir de um template GitHub habilitado ou copie os arquivos para um repositório vazio antes do primeiro commit.
+
+Antes de desenvolver o app novo, ajuste `name`, `slug`, `scheme`, `ios.bundleIdentifier`, `android.package`, `package.json`, ícones, splash, textos e rotas. Crie um EAS project próprio somente se for usar EAS; nunca reutilize IDs ou credenciais de outro app.
+
+O Starter contém automações específicas para `C:\Projetos\Starter` e `LuanRigatti/Starter-NativeSim-Public`. Antes de publicar um app derivado, remova ou adapte `.github/`, `.agents/skills/` e os scripts `mirror-starter`, `Start-StarterNativeSim`, `Invoke-StarterSwiftPreflight` e `Download-StarterSimulatorArchive`. Não os use para apontar o app novo aos repositórios do Starter.
+
 ## EAS independente
 
 O arquivo eas.json contém perfis apenas para Simulator. O projeto não fica vinculado ao EAS por padrão. Para usar EAS, crie um projeto separado para Starter e configure `EXPO_TOKEN` e a variável `EAS_PROJECT_ID` no repositório. O workflow injeta esse ID somente por `STARTER_EAS_PROJECT_ID` e valida bundle ID e perfil Simulator antes de solicitar o build.
@@ -63,7 +81,9 @@ Depois da conclusão do CLI, use o ID numérico presente na URL do GitHub Action
 
     pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Download-StarterSimulatorArchive.ps1 -RunId <RUN_ID>
 
-O artefato é um arquivo .app.tar.gz, preservado como tar para manter permissões e symlinks. A retenção é de um dia. Os workflows são manuais e não são executados ao fazer push.
+O artefato é um arquivo .app.tar.gz, preservado como tar para manter permissões e symlinks. A retenção é de um dia. Os arquivos YAML declaram `workflow_dispatch`; nenhuma sessão ou compilação deve começar sem pedido explícito.
+
+Na preparação inicial, o GitHub registrou alguns checks de `push` no Starter privado como falhas sem jobs, sem check runs e sem logs. Nenhum runner ou build começou. Esses registros não apareceram no espelho público; confira a aba Actions antes do primeiro dispatch manual.
 
 ## Conteúdo demonstrativo
 
