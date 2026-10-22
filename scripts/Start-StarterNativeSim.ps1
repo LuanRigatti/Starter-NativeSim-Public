@@ -183,11 +183,11 @@ try {
 
   $preflightScript = Join-Path $sourceRoot 'scripts\Invoke-StarterSwiftPreflight.ps1'
   $preflightResults = @(& $preflightScript -PassThru)
-  if ($preflightResults.Count -ne 1 -or -not $preflightResults[0].Passed -or
-      $preflightResults[0].Sha -ne $mirrorSha -or $preflightResults[0].Branch -ne 'main') {
-    throw 'Swift Preflight did not pass for the exact public mirror SHA; NativeSim was not started.'
-  }
-  $preflight = $preflightResults[0]
+  $preflight = Assert-StarterSwiftPreflightResult -Results $preflightResults `
+    -ExpectedRepository $repo `
+    -ExpectedWorkflowPath '.github/workflows/swift-preflight.yml' `
+    -ExpectedBranch 'main' `
+    -ExpectedSha $mirrorSha
 
   $postSourceSha = Assert-Repository -Root $sourceRoot -Slug $sourceRepo -ExpectedBranch 'main'
   $postMirrorSha = Assert-Repository -Root $publicRoot -Slug $repo -ExpectedBranch 'main'

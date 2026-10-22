@@ -161,6 +161,9 @@ try {
   $archiveScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'scripts\Download-StarterSimulatorArchive.ps1') -Raw
   $nativeSimUpText = Get-Content -LiteralPath (Join-Path $package 'src\commands\up.js') -Raw
   Assert-True ($launcher.Contains('StarterNativeSimLaunch') -and $launcher.Contains('Get-ActiveNativeSimRuns') -and $launcher.Contains('No duplicate was started')) 'duplicate-session mutex and active-run guard remain present'
+  Assert-True ($preflight.Contains('$dispatchOutput = @(& gh workflow run') -and $preflight.Contains('2>&1)') -and
+    $launcher.Contains('Assert-StarterSwiftPreflightResult') -and
+    $launcher.IndexOf('Assert-StarterSwiftPreflightResult',[StringComparison]::Ordinal) -lt $launcher.IndexOf('$nativeProcess.Start()',[StringComparison]::Ordinal)) 'dispatch output is captured and strict Preflight result validation runs before NativeSim can start'
   $activeFixtures = @(
     [pscustomobject]@{ id='42'; path='.github/workflows/native-sim.yml'; event='workflow_dispatch'; head_branch='main'; status='in_progress' },
     [pscustomobject]@{ id='42'; path='.github/workflows/native-sim.yml'; event='workflow_dispatch'; head_branch='main'; status='in_progress' },
@@ -170,39 +173,120 @@ try {
   $activeSelected = @(Select-StarterNativeSimActiveRuns -Runs $activeFixtures)
   Assert-True ($activeSelected.Count -eq 1 -and [string]$activeSelected[0].id -eq '42') 'duplicate NativeSim runs are deduplicated and unrelated runs are ignored'
 
-  $global:StarterTestPreflightMode = 'success'
+  $global:StarterTestPreflightMode = 'reused-success'
   $global:StarterTestPreflightSha = ((& git -C 'C:\Projetos\Starter-NativeSim-Public' rev-parse HEAD 2>&1 | Out-String).Trim())
   $global:StarterTestPreflightDispatchCount = 0
+  $global:StarterTestPreflightApiCount = 0
+  $global:StarterTestPreflightNativeSimStartCount = 0
   function global:gh {
     param([Parameter(ValueFromRemainingArguments=$true)][string[]]$GhArgs)
     $global:LASTEXITCODE = 0
     if ($GhArgs[0] -eq 'repo') { return 'PUBLIC' }
     if ($GhArgs[0] -eq 'run' -and $GhArgs[1] -eq 'list') {
-      $status = if ($global:StarterTestPreflightMode -eq 'active') { 'in_progress' } else { 'completed' }
-      $conclusion = if ($status -eq 'completed') { 'success' } else { '' }
+      $mode = $global:StarterTestPreflightMode
+      if ($mode -in @('dispatch-normal','dispatch-extra','dispatch-failed','dispatch-cancelled') -and $global:StarterTestPreflightDispatchCount -eq 0) { return '[]' }
+      $status = if ($mode -eq 'active-success') { 'in_progress' } else { 'completed' }
+      $conclusion = if ($mode -eq 'dispatch-failed') { 'failure' } elseif ($mode -eq 'dispatch-cancelled') { 'cancelled' } elseif ($status -eq 'completed') { 'success' } else { '' }
       return ([pscustomobject]@{ databaseId=123456789; headSha=$global:StarterTestPreflightSha; headBranch='main'; status=$status; conclusion=$conclusion; url='https://github.com/LuanRigatti/Starter-NativeSim-Public/actions/runs/123456789'; event='workflow_dispatch' } | ConvertTo-Json -Compress)
     }
     if ($GhArgs[0] -eq 'api') {
-      $status = if ($global:StarterTestPreflightMode -eq 'active') { 'in_progress' } else { 'completed' }
-      $conclusion = if ($status -eq 'completed') { 'success' } else { '' }
-      return ([pscustomobject]@{ id=123456789; path='.github/workflows/swift-preflight.yml'; event='workflow_dispatch'; head_branch='main'; head_sha=$global:StarterTestPreflightSha; status=$status; conclusion=$conclusion; html_url='https://github.com/LuanRigatti/Starter-NativeSim-Public/actions/runs/123456789' } | ConvertTo-Json -Compress)
+      $global:StarterTestPreflightApiCount++
+      $mode = $global:StarterTestPreflightMode
+      $status = if ($mode -eq 'active-success' -and $global:StarterTestPreflightApiCount -eq 1) { 'in_progress' } else { 'completed' }
+      $conclusion = if ($mode -eq 'dispatch-failed') { 'failure' } elseif ($mode -eq 'dispatch-cancelled') { 'cancelled' } elseif ($status -eq 'completed') { 'success' } else { '' }
+      $runSha = if ($mode -eq 'sha-mismatch') { 'f' * 40 } else { $global:StarterTestPreflightSha }
+      return ([pscustomobject]@{ id=123456789; path='.github/workflows/swift-preflight.yml'; event='workflow_dispatch'; head_branch='main'; head_sha=$runSha; status=$status; conclusion=$conclusion; html_url='https://github.com/LuanRigatti/Starter-NativeSim-Public/actions/runs/123456789' } | ConvertTo-Json -Compress)
     }
     if ($GhArgs[0] -eq 'workflow' -and $GhArgs[1] -eq 'run') {
       $global:StarterTestPreflightDispatchCount++
-      $global:LASTEXITCODE = 1
-      return 'blocked by test mock'
+      if ($global:StarterTestPreflightMode -eq 'dispatch-extra') { return @('Created workflow_dispatch event for Swift Preflight.','unexpected extra CLI diagnostic') }
+      return 'Created workflow_dispatch event for Swift Preflight.'
     }
     $global:LASTEXITCODE = 1
     throw "Unexpected GitHub CLI call in test mock: $($GhArgs -join ' ')"
   }
+  function global:Start-Sleep { param([int]$Seconds) }
   $preflightScript = Join-Path $repositoryRoot 'scripts\Invoke-StarterSwiftPreflight.ps1'
+  $expectedPreflightParameters = @{
+    ExpectedRepository = 'LuanRigatti/Starter-NativeSim-Public'
+    ExpectedWorkflowPath = '.github/workflows/swift-preflight.yml'
+    ExpectedBranch = 'main'
+    ExpectedSha = $global:StarterTestPreflightSha
+  }
+  $global:StarterTestPreflightMode = 'reused-success'
   $reusedPreflight = @(& $preflightScript -PassThru)
-  Assert-True ($reusedPreflight.Count -eq 1 -and $reusedPreflight[0].Passed -and $reusedPreflight[0].Reused -and
-    $reusedPreflight[0].Sha -eq $global:StarterTestPreflightSha -and $global:StarterTestPreflightDispatchCount -eq 0) 'successful exact-SHA Preflight is reused without dispatch'
-  $global:StarterTestPreflightMode = 'active'
+  $validatedReusedPreflight = Assert-StarterSwiftPreflightResult -Results $reusedPreflight @expectedPreflightParameters
+  Assert-True ($reusedPreflight.Count -eq 1 -and $reusedPreflight[0] -is [pscustomobject] -and $validatedReusedPreflight.Passed -and
+    $validatedReusedPreflight.Reused -and $validatedReusedPreflight.Repository -eq $expectedPreflightParameters.ExpectedRepository -and
+    $validatedReusedPreflight.WorkflowPath -eq $expectedPreflightParameters.ExpectedWorkflowPath -and
+    $validatedReusedPreflight.Event -eq 'workflow_dispatch' -and $validatedReusedPreflight.Sha -eq $global:StarterTestPreflightSha -and
+    $global:StarterTestPreflightDispatchCount -eq 0) 'successful exact-SHA Preflight reuse returns one fully verified object without dispatch'
+
+  $global:StarterTestPreflightMode = 'active-success'
+  $global:StarterTestPreflightApiCount = 0
+  $global:StarterTestPreflightDispatchCount = 0
+  $completedActivePreflight = @(& $preflightScript -PassThru)
+  $validatedActivePreflight = Assert-StarterSwiftPreflightResult -Results $completedActivePreflight @expectedPreflightParameters
+  Assert-True ($completedActivePreflight.Count -eq 1 -and $validatedActivePreflight.Passed -and $validatedActivePreflight.Reused -and
+    $validatedActivePreflight.Status -eq 'completed' -and $validatedActivePreflight.Conclusion -eq 'success' -and
+    $global:StarterTestPreflightDispatchCount -eq 0) 'active exact-SHA Preflight is reused, awaited, and returns one completed success object'
+
+  $global:StarterTestPreflightMode = 'active-success'
+  $global:StarterTestPreflightApiCount = 0
   $activePreflight = @(& $preflightScript -NoWait -PassThru)
-  Assert-True ($activePreflight.Count -eq 1 -and -not $activePreflight[0].Passed -and $activePreflight[0].Reused -and $global:StarterTestPreflightDispatchCount -eq 0) 'active exact-SHA Preflight is reused without dispatch or waiting'
+  Assert-True ($activePreflight.Count -eq 1 -and $activePreflight[0] -is [pscustomobject] -and -not $activePreflight[0].Passed -and
+    $activePreflight[0].Reused -and $activePreflight[0].Status -eq 'in_progress' -and $global:StarterTestPreflightDispatchCount -eq 0) 'active exact-SHA Preflight NoWait contract returns one structured in-progress result'
+  Assert-Refused { Assert-StarterSwiftPreflightResult -Results $activePreflight @expectedPreflightParameters } 'NativeSim result gate refuses a Preflight that is still in progress'
+
+  foreach ($dispatchMode in @('dispatch-normal','dispatch-extra')) {
+    $global:StarterTestPreflightMode = $dispatchMode
+    $global:StarterTestPreflightApiCount = 0
+    $global:StarterTestPreflightDispatchCount = 0
+    $dispatchResult = @(& $preflightScript -PassThru)
+    $validatedDispatchResult = Assert-StarterSwiftPreflightResult -Results $dispatchResult @expectedPreflightParameters
+    Assert-True ($dispatchResult.Count -eq 1 -and $dispatchResult[0] -is [pscustomobject] -and $validatedDispatchResult.Passed -and
+      -not $validatedDispatchResult.Reused -and $validatedDispatchResult.Sha -eq $global:StarterTestPreflightSha -and
+      $global:StarterTestPreflightDispatchCount -eq 1) "new Preflight dispatch '$dispatchMode' emits exactly one verified object despite CLI text"
+  }
+
+  $global:StarterTestPreflightMode = 'sha-mismatch'
+  $global:StarterTestPreflightApiCount = 0
+  $global:StarterTestPreflightDispatchCount = 0
+  Assert-Refused { & $preflightScript -PassThru | Out-Null } 'Preflight API result with a divergent SHA is rejected before NativeSim'
+  Assert-True ($global:StarterTestPreflightDispatchCount -eq 0) 'SHA mismatch cannot dispatch or reach the NativeSim launch point'
+
+  foreach ($failureMode in @('dispatch-failed','dispatch-cancelled')) {
+    $global:StarterTestPreflightMode = $failureMode
+    $global:StarterTestPreflightApiCount = 0
+    $global:StarterTestPreflightDispatchCount = 0
+    $preflightFailed = $false
+    try {
+      $failedResult = @(& $preflightScript -PassThru)
+      $null = Assert-StarterSwiftPreflightResult -Results $failedResult @expectedPreflightParameters
+      $global:StarterTestPreflightNativeSimStartCount++
+    } catch { $preflightFailed = $true }
+    Assert-True ($preflightFailed -and $global:StarterTestPreflightNativeSimStartCount -eq 0 -and
+      $global:StarterTestPreflightDispatchCount -eq 1) "Preflight '$failureMode' blocks NativeSim launch after one mocked dispatch"
+  }
+
+  $unexpectedOutput = @('dispatch confirmation',[pscustomobject]@{ Passed=$true })
+  Assert-Refused { Assert-StarterSwiftPreflightResult -Results $unexpectedOutput @expectedPreflightParameters } 'strict Preflight gate rejects extra success-pipeline text instead of ignoring it'
+  $invalidPreflightMetadata = @(
+    [pscustomobject]@{ Property='Repository'; Value='LuanRigatti/other-repo' },
+    [pscustomobject]@{ Property='WorkflowPath'; Value='.github/workflows/other.yml' },
+    [pscustomobject]@{ Property='Event'; Value='push' },
+    [pscustomobject]@{ Property='Branch'; Value='release' },
+    [pscustomobject]@{ Property='Sha'; Value=('a' * 40) },
+    [pscustomobject]@{ Property='Status'; Value='in_progress' },
+    [pscustomobject]@{ Property='Conclusion'; Value='failure' }
+  )
+  foreach ($invalidMetadata in $invalidPreflightMetadata) {
+    $invalidResult = $validatedReusedPreflight | Select-Object *
+    $invalidResult.($invalidMetadata.Property) = $invalidMetadata.Value
+    Assert-Refused { Assert-StarterSwiftPreflightResult -Results @($invalidResult) @expectedPreflightParameters } "strict Preflight gate rejects mismatched $($invalidMetadata.Property) metadata"
+  }
   Remove-Item Function:\global:gh -Force
+  Remove-Item Function:\global:Start-Sleep -Force
 
   Assert-True ($launcher.Contains('Authenticated Simulator:') -and $launcher.Contains('$json.Contains($SimulatorUrl)')) 'authenticated link is delivered only after metadata rejects URL persistence'
   $fullSimulatorUrl = 'https://starter.trycloudflare.com/?k=abcdefghijklmnopqrstuvwxyz0123456789&mode=stream'

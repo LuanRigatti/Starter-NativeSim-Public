@@ -59,6 +59,28 @@ function Get-VerifiedPreflightRun {
   return $run
 }
 
+function New-PreflightResult {
+  param(
+    [Parameter(Mandatory)]$Run,
+    [Parameter(Mandatory)][bool]$Reused,
+    [Parameter(Mandatory)][bool]$Passed
+  )
+
+  return [pscustomobject]@{
+    Passed = $Passed
+    Reused = $Reused
+    Repository = $repo
+    WorkflowPath = [string]$Run.path
+    Event = [string]$Run.event
+    RunId = [string]$Run.id
+    Branch = [string]$Run.head_branch
+    Sha = [string]$Run.head_sha
+    Url = [string]$Run.html_url
+    Status = [string]$Run.status
+    Conclusion = [string]$Run.conclusion
+  }
+}
+
 $runs = @(Get-PreflightRuns | Where-Object {
   $_.headSha -eq $sha -and $_.headBranch -eq 'main' -and $_.event -eq 'workflow_dispatch'
 })
@@ -92,8 +114,12 @@ if ($active.Count -eq 1) {
 
 if (-not $run) {
   Write-Host "No successful or active exact-SHA Swift Preflight exists for $sha; dispatching one run."
-  & gh workflow run $workflow --repo $repo --ref main
-  if ($LASTEXITCODE -ne 0) { throw 'GitHub rejected Swift Preflight dispatch.' }
+  $dispatchOutput = @(& gh workflow run $workflow --repo $repo --ref main 2>&1)
+  $dispatchExitCode = $LASTEXITCODE
+  if ($dispatchExitCode -ne 0) {
+    $dispatchDetails = ($dispatchOutput | ForEach-Object { "$_" }) -join "`n"
+    throw "GitHub rejected Swift Preflight dispatch. $dispatchDetails"
+  }
 
   $run = $null
   $discoverUntil = [DateTimeOffset]::UtcNow.AddMinutes(2)
@@ -115,16 +141,7 @@ if (-not $run) {
 $runId = [string]$run.id
 if (-not $runId) { throw 'Swift Preflight run has no GitHub run ID.' }
 if ($NoWait -and $run.status -ne 'completed') {
-  $result = [pscustomobject]@{
-    Passed = $false
-    Reused = $reused
-    RunId = $runId
-    Branch = 'main'
-    Sha = $sha
-    Url = [string]$run.html_url
-    Status = [string]$run.status
-    Conclusion = [string]$run.conclusion
-  }
+  $result = New-PreflightResult -Run $run -Reused $reused -Passed $false
   if ($PassThru) { return $result }
   Write-Output "Swift Preflight run: $($result.Url)"
   Write-Output "Run ID: $runId | Branch: main | SHA: $sha | Status: $($result.Status)"
@@ -142,16 +159,7 @@ do {
 if ($current.status -ne 'completed') { throw "Swift Preflight run $runId did not complete within $TimeoutMinutes minutes: $($current.html_url)" }
 if ($current.conclusion -ne 'success') { throw "Swift Preflight concluded '$($current.conclusion)' for $sha. Run: $($current.html_url)" }
 
-$result = [pscustomobject]@{
-  Passed = $true
-  Reused = $reused
-  RunId = $runId
-  Branch = 'main'
-  Sha = $sha
-  Url = [string]$current.html_url
-  Status = [string]$current.status
-  Conclusion = [string]$current.conclusion
-}
+$result = New-PreflightResult -Run $current -Reused $reused -Passed $true
 if ($PassThru) { return $result }
 $reuseText = if ($reused) { 'reused' } else { 'passed' }
 Write-Output "Swift Preflight ${reuseText}: $($result.Url)"

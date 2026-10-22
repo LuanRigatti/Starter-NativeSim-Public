@@ -30,6 +30,51 @@ function Select-StarterNativeSimActiveRuns {
   return @($selected)
 }
 
+function Assert-StarterSwiftPreflightResult {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Results,
+    [Parameter(Mandatory)][string]$ExpectedRepository,
+    [Parameter(Mandatory)][string]$ExpectedWorkflowPath,
+    [Parameter(Mandatory)][string]$ExpectedBranch,
+    [Parameter(Mandatory)][string]$ExpectedSha
+  )
+
+  if ($Results.Count -ne 1) {
+    throw "Swift Preflight must return exactly one structured result; received $($Results.Count) output items."
+  }
+  $result = $Results[0]
+  if ($result -isnot [pscustomobject]) {
+    throw 'Swift Preflight returned a non-structured success-pipeline item.'
+  }
+
+  $requiredProperties = @('Passed','Reused','Repository','WorkflowPath','Event','RunId','Branch','Sha','Url','Status','Conclusion')
+  foreach ($propertyName in $requiredProperties) {
+    if ($null -eq $result.PSObject.Properties[$propertyName]) {
+      throw "Swift Preflight result is missing required metadata '$propertyName'."
+    }
+  }
+  if ($result.Passed -isnot [bool] -or -not $result.Passed -or $result.Reused -isnot [bool]) {
+    throw 'Swift Preflight did not report a passed structured result.'
+  }
+  if ([string]$result.Repository -cne $ExpectedRepository -or
+      [string]$result.WorkflowPath -cne $ExpectedWorkflowPath -or
+      [string]$result.Event -cne 'workflow_dispatch' -or
+      [string]$result.Branch -cne $ExpectedBranch -or
+      [string]$result.Sha -cne $ExpectedSha) {
+    throw 'Swift Preflight result does not match the expected repository, workflow, event, branch, and exact SHA.'
+  }
+  if ([string]$result.Status -cne 'completed' -or [string]$result.Conclusion -cne 'success') {
+    throw 'Swift Preflight result is not completed with conclusion success.'
+  }
+  if ([string]$result.RunId -notmatch '^\d+$' -or
+      [string]$result.Url -cne "https://github.com/$ExpectedRepository/actions/runs/$($result.RunId)") {
+    throw 'Swift Preflight result has an invalid GitHub Actions run ID or URL.'
+  }
+
+  return $result
+}
+
 function Assert-StarterSimulatorUrl {
   [CmdletBinding()]
   param([Parameter(Mandatory)][string]$Url)
@@ -240,4 +285,4 @@ process.stdout.write(JSON.stringify({ changed }) + '\n');
   }
 }
 
-Export-ModuleMember -Function Select-StarterNativeSimActiveRuns,Assert-StarterSimulatorUrl,Assert-StarterNativeSimExportBehavior,Assert-StarterSimulatorArchive,Assert-StarterArchiveRun,Select-StarterArchiveArtifact,Test-StarterArchiveBuildSteps,Assert-StarterNativeSimCliCompatible,Invoke-StarterNativeSimScaffoldPreview
+Export-ModuleMember -Function Select-StarterNativeSimActiveRuns,Assert-StarterSwiftPreflightResult,Assert-StarterSimulatorUrl,Assert-StarterNativeSimExportBehavior,Assert-StarterSimulatorArchive,Assert-StarterArchiveRun,Select-StarterArchiveArtifact,Test-StarterArchiveBuildSteps,Assert-StarterNativeSimCliCompatible,Invoke-StarterNativeSimScaffoldPreview
